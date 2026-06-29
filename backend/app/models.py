@@ -49,6 +49,10 @@ class ArchitectureDNA(BaseModel):
     churn_concentration: float
     hotspot_concentration: float
     centralization_score: float
+    hub_dominance: float = 0
+    graph_entropy: float = 0
+    layer_separation: float = 0
+    cyclic_dependency_score: float = 0
 
 
 class SpeciesClassification(BaseModel):
@@ -140,6 +144,8 @@ class CounterfactualEstimate(BaseModel):
     alternative: dict[str, float]
     estimated_delta: dict[str, float]
     explanation: str
+    actual_timeline: list[dict[str, float | int | str]] = []
+    alternative_timeline: list[dict[str, float | int | str]] = []
 
 
 class ArchitecturalMemory(BaseModel):
@@ -150,6 +156,62 @@ class ArchitecturalMemory(BaseModel):
     reason: str
     affected_modules: list[str]
     supporting_commits: list[CommitInfo]
+    still_active: bool = True
+    dependency_count: int = 0
+    introduced_snapshot: int = 0
+
+
+class ButterflyEffect(BaseModel):
+    immediate_impact: float
+    medium_term_impact: float
+    long_term_impact: float
+    influence_radius: int
+    dependency_growth_caused: int
+    future_modules_affected: list[str]
+    shockwave: dict[str, list[str]]
+    explanation: str
+    evidence: list[str]
+
+
+class ArchitecturalDecision(BaseModel):
+    id: str
+    title: str
+    summary: str
+    confidence: float
+    start_commit: CommitInfo | None = None
+    end_commit: CommitInfo | None = None
+    start_snapshot: int
+    end_snapshot: int
+    affected_modules: list[str]
+    architectural_impact_score: float
+    causes: list[CausalFinding]
+    supporting_commits: list[CommitInfo]
+    butterfly_effect: ButterflyEffect
+    turning_point_rank: int | None = None
+
+
+class ModuleFamilyNode(BaseModel):
+    id: str
+    label: str
+    introduced_snapshot: int
+    latest_snapshot: int
+    status: str
+    ancestors: list[str] = []
+    descendants: list[str] = []
+    evidence: list[str] = []
+
+
+class ModuleFamilyEdge(BaseModel):
+    source: str
+    target: str
+    relationship: str
+    confidence: float
+    explanation: str
+
+
+class ModuleFamilyTree(BaseModel):
+    nodes: list[ModuleFamilyNode]
+    edges: list[ModuleFamilyEdge]
 
 
 class Forecast(BaseModel):
@@ -177,6 +239,9 @@ class Health(BaseModel):
     turning_points: list[TurningPoint] = []
     memories: list[ArchitecturalMemory] = []
     counterfactuals: list[CounterfactualEstimate] = []
+    decisions: list[ArchitecturalDecision] = []
+    decision_influence_graph: InfluenceGraph | None = None
+    family_tree: ModuleFamilyTree | None = None
     quality_trend: list[int] = []
     report_markdown: str = ""
     report_html: str = ""
@@ -188,4 +253,5 @@ class AnalysisResult(BaseModel):
     repo_path: str
     snapshots: list[Snapshot]
     events: list[ArchitectureEvent]
+    decisions: list[ArchitecturalDecision] = []
     health: Health

@@ -16,7 +16,7 @@ import {
 } from "recharts";
 import { DependencyGraph } from "../components/DependencyGraph";
 import { analyzeRepo, getEvents, getHealth, getReport, getReportUrl, getSampleRepo, getSnapshot, getTimeline } from "../lib/api";
-import type { ArchitectureEvent, Health, Snapshot, Timeline } from "../lib/types";
+import type { ArchitecturalDecision, ArchitectureEvent, Health, Snapshot, Timeline } from "../lib/types";
 
 const samplePath = "/Users/shravan/Documents/Pulsecode";
 
@@ -30,6 +30,7 @@ export default function Home() {
   const [health, setHealth] = useState<Health | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [selectedEvent, setSelectedEvent] = useState<ArchitectureEvent | null>(null);
+  const [selectedDecision, setSelectedDecision] = useState<ArchitecturalDecision | null>(null);
   const [beforeSnapshot, setBeforeSnapshot] = useState<Snapshot | null>(null);
   const [lens, setLens] = useState<"directory" | "churn" | "centrality" | "complexity" | "hotspot">("directory");
   const [playing, setPlaying] = useState(false);
@@ -44,6 +45,7 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setSelectedEvent(null);
+    setSelectedDecision(null);
     setBeforeSnapshot(null);
     try {
       const analysis = await analyzeRepo(repoPath, snapshotSize);
@@ -96,6 +98,7 @@ export default function Home() {
       setActiveIndex(0);
       setCompareIndex(Math.max(0, analysis.snapshot_count - 1));
       setSelectedEvent(null);
+      setSelectedDecision(null);
       setBeforeSnapshot(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sample analysis failed");
@@ -106,6 +109,7 @@ export default function Home() {
 
   async function selectEvent(event: ArchitectureEvent) {
     setSelectedEvent(event);
+    setSelectedDecision(null);
     setShockwavePhase(0);
     if (repoId) {
       const [before, after] = await Promise.all([
@@ -115,6 +119,22 @@ export default function Home() {
       setBeforeSnapshot(before);
       setSnapshot(after);
       setActiveIndex(event.index);
+    }
+  }
+
+  async function selectDecision(decision: ArchitecturalDecision) {
+    setSelectedDecision(decision);
+    setShockwavePhase(0);
+    const matchingEvent = events.find((event) => event.index === decision.end_snapshot) ?? null;
+    setSelectedEvent(matchingEvent);
+    if (repoId) {
+      const [before, after] = await Promise.all([
+        getSnapshot(repoId, Math.max(0, decision.start_snapshot)),
+        getSnapshot(repoId, decision.end_snapshot)
+      ]);
+      setBeforeSnapshot(before);
+      setSnapshot(after);
+      setActiveIndex(decision.end_snapshot);
     }
   }
 
@@ -155,12 +175,12 @@ export default function Home() {
   }, [activeIndex, loopPlayback, maxIndex, moveTo, playbackSpeed, playing, timeline]);
 
   useEffect(() => {
-    if (!selectedEvent) return;
+    if (!selectedEvent && !selectedDecision) return;
     const timer = window.setInterval(() => {
       setShockwavePhase((phase) => (phase >= 3 ? 0 : phase + 1));
     }, 900);
     return () => window.clearInterval(timer);
-  }, [selectedEvent]);
+  }, [selectedDecision, selectedEvent]);
 
   const chartData = useMemo(
     () =>
@@ -186,11 +206,12 @@ export default function Home() {
   }, [compareSnapshot, snapshot]);
 
   const shockwaveNodes = useMemo(() => {
-    if (!selectedEvent?.shockwave) return [];
+    const shockwave = selectedDecision?.butterfly_effect.shockwave ?? selectedEvent?.shockwave;
+    if (!shockwave) return [];
     const rings = ["changed_files", "neighbor_modules", "graph"] as const;
-    return rings.slice(0, shockwavePhase + 1).flatMap((ring) => selectedEvent.shockwave[ring] ?? []);
-  }, [selectedEvent, shockwavePhase]);
-  const highlighted = shockwaveNodes.length ? shockwaveNodes : selectedEvent?.affected_modules ?? health?.forecast?.likely_bottlenecks ?? [];
+    return rings.slice(0, shockwavePhase + 1).flatMap((ring) => shockwave[ring] ?? []);
+  }, [selectedDecision, selectedEvent, shockwavePhase]);
+  const highlighted = shockwaveNodes.length ? shockwaveNodes : selectedDecision?.affected_modules ?? selectedEvent?.affected_modules ?? health?.forecast?.likely_bottlenecks ?? [];
 
   return (
     <main className="min-h-screen bg-paper">
@@ -337,6 +358,11 @@ export default function Home() {
           </div>
 
           <DependencyGraph snapshot={snapshot} highlighted={highlighted} lens={lens} />
+          <DecisionReplay
+            decisions={health?.decisions ?? []}
+            selected={selectedDecision}
+            onSelect={selectDecision}
+          />
           <DnaPanel
             snapshot={snapshot}
             compareIndex={compareIndex}
@@ -351,7 +377,8 @@ export default function Home() {
 
         <aside className="flex flex-col gap-5">
           <WeatherPanel health={health} snapshot={snapshot} onExport={exportReportAs} canExport={Boolean(repoId)} />
-          <WhyPanel health={health} selectedEvent={selectedEvent} />
+          <WhyPanel health={health} selectedEvent={selectedEvent} selectedDecision={selectedDecision} />
+          <FamilyTreePanel health={health} />
           <MetricsPanel snapshot={snapshot} />
           <div className="rounded-md border border-ink/10 bg-white p-4 shadow-soft">
             <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Evolution Signal</h2>
@@ -377,6 +404,85 @@ export default function Home() {
         </aside>
       </section>
     </main>
+  );
+}
+
+function DecisionReplay({
+  decisions,
+  selected,
+  onSelect
+}: {
+  decisions: ArchitecturalDecision[];
+  selected: ArchitecturalDecision | null;
+  onSelect: (decision: ArchitecturalDecision) => void;
+}) {
+  return (
+    <div className="mt-4 rounded-md border border-ink/10 bg-white p-4 shadow-soft">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Decision Replay</h2>
+          <p className="mt-1 text-sm text-ink/60">Architectural decisions become the timeline landmarks.</p>
+        </div>
+        <span className="rounded-md bg-cobalt/10 px-2 py-1 text-xs font-semibold text-cobalt">
+          {decisions.length} decisions
+        </span>
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_260px]">
+        <div className="flex gap-3 overflow-x-auto pb-2">
+          {decisions.length === 0 ? (
+            <div className="min-h-24 flex-1 rounded-md border border-dashed border-ink/20 bg-[#fbfaf6] p-4 text-sm text-ink/55">
+              Analyze a repository to isolate architectural decisions.
+            </div>
+          ) : (
+            decisions.slice(0, 12).map((decision) => (
+              <button
+                key={decision.id}
+                onClick={() => onSelect(decision)}
+                className={`min-w-64 rounded-md border p-3 text-left transition ${
+                  selected?.id === decision.id
+                    ? "border-rust bg-rust/10"
+                    : "border-ink/10 bg-[#fbfaf6] hover:border-cobalt/40"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-ink/50">t={decision.end_snapshot}</span>
+                  <span className="rounded bg-amber/15 px-2 py-0.5 text-xs font-semibold text-ink/65">
+                    {decision.architectural_impact_score.toFixed(1)}
+                  </span>
+                </div>
+                <div className="mt-2 text-sm font-semibold text-ink">{decision.title}</div>
+                <div className="mt-1 line-clamp-3 text-xs leading-5 text-ink/60">{decision.summary}</div>
+              </button>
+            ))
+          )}
+        </div>
+        <div className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Butterfly Effect</div>
+          {selected ? (
+            <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+              <MiniMetric label="Immediate" value={selected.butterfly_effect.immediate_impact.toFixed(1)} />
+              <MiniMetric label="Long-term" value={selected.butterfly_effect.long_term_impact.toFixed(1)} />
+              <MiniMetric label="Radius" value={selected.butterfly_effect.influence_radius.toString()} />
+              <MiniMetric label="Deps" value={`+${selected.butterfly_effect.dependency_growth_caused}`} />
+            </div>
+          ) : (
+            <p className="mt-2 text-sm leading-5 text-ink/60">Select a decision to watch its simulated shockwave through future graph structure.</p>
+          )}
+          {selected?.butterfly_effect.evidence.length ? (
+            <p className="mt-3 text-xs leading-5 text-ink/60">{selected.butterfly_effect.evidence[0]}</p>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-ink/10 bg-white p-2">
+      <div className="text-[11px] text-ink/45">{label}</div>
+      <div className="mt-1 font-semibold text-ink">{value}</div>
+    </div>
   );
 }
 
@@ -622,21 +728,62 @@ function WeatherPanel({
   );
 }
 
-function WhyPanel({ health, selectedEvent }: { health: Health | null; selectedEvent: ArchitectureEvent | null }) {
+function FamilyTreePanel({ health }: { health: Health | null }) {
+  const tree = health?.family_tree;
+  const edges = tree?.edges.slice(0, 5) ?? [];
+  return (
+    <div className="rounded-md border border-ink/10 bg-white p-4 shadow-soft">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Family Tree</h2>
+        <span className="text-xs font-semibold text-ink/50">{tree?.nodes.length ?? 0} modules</span>
+      </div>
+      <div className="mt-3 flex flex-col gap-2">
+        {edges.length ? (
+          edges.map((edge) => (
+            <div key={`${edge.source}-${edge.target}-${edge.relationship}`} className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3 text-sm">
+              <div className="font-semibold text-ink">{edge.relationship}</div>
+              <div className="mt-1 text-xs leading-5 text-ink/60">
+                {edge.source.split("/").slice(-2).join("/")} → {edge.target.split("/").slice(-2).join("/")}
+              </div>
+              <div className="mt-1 text-xs text-ink/45">confidence {Math.round(edge.confidence * 100)}%</div>
+            </div>
+          ))
+        ) : (
+          <p className="text-sm leading-5 text-ink/55">Module genealogy will appear when PulseCode detects splits, renames, abstractions, or responsibility inheritance.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WhyPanel({
+  health,
+  selectedEvent,
+  selectedDecision
+}: {
+  health: Health | null;
+  selectedEvent: ArchitectureEvent | null;
+  selectedDecision: ArchitecturalDecision | null;
+}) {
   const topTurningPoint = health?.turning_points[0];
   const topMemory = health?.memories[0];
   const counterfactual = selectedEvent
     ? health?.counterfactuals.find((item) => item.event_index === selectedEvent.index)
     : health?.counterfactuals[0];
-  const influence = health?.influence_graph?.edges[0];
+  const influence = health?.decision_influence_graph?.edges[0] ?? health?.influence_graph?.edges[0];
   return (
     <div className="rounded-md border border-ink/10 bg-white p-4 shadow-soft">
       <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Why Engine</h2>
       <div className="mt-3 flex flex-col gap-3">
         <ResearchCard
+          title="Decision"
+          value={selectedDecision?.title ?? health?.decisions[0]?.title ?? "No decision isolated"}
+          detail={selectedDecision?.summary ?? health?.decisions[0]?.summary ?? "PulseCode stores decisions independently from commits."}
+        />
+        <ResearchCard
           title="Likely Cause"
-          value={selectedEvent?.causes[0]?.cause ?? "Select an event"}
-          detail={selectedEvent?.causes[0]?.evidence[0] ?? "PulseCode infers causal mechanisms for each architectural event."}
+          value={selectedDecision?.causes[0]?.cause ?? selectedEvent?.causes[0]?.cause ?? "Select an event"}
+          detail={selectedDecision?.causes[0]?.evidence[0] ?? selectedEvent?.causes[0]?.evidence[0] ?? "PulseCode infers causal mechanisms for each architectural event."}
         />
         <ResearchCard
           title="Turning Point"

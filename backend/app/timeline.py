@@ -19,6 +19,8 @@ from .models import (
     ArchitecturalWeather,
     ArchitectureDNA,
     ArchitectureEvent,
+    ArchitecturalDecision,
+    ButterflyEffect,
     CausalFinding,
     CounterfactualEstimate,
     CommitInfo,
@@ -28,6 +30,9 @@ from .models import (
     Health,
     InfluenceEdge,
     InfluenceGraph,
+    ModuleFamilyEdge,
+    ModuleFamilyNode,
+    ModuleFamilyTree,
     Snapshot,
     SnapshotMetrics,
     SpeciesClassification,
@@ -71,10 +76,24 @@ def analyze_repository(repo_path: Path, snapshot_size: int) -> AnalysisResult:
     _attach_event_causes(events, snapshots)
     fossils = _detect_fossils(snapshots, events)
     turning_points = _turning_points(snapshots)
+    decisions = _architectural_decisions(snapshots, events, turning_points)
     memories = _architectural_memories(snapshots, events)
-    counterfactuals = _counterfactuals(events)
+    counterfactuals = _counterfactuals(events, snapshots)
     influence_graph = _influence_graph(events)
-    health = _build_health(snapshots, events, fossils, turning_points, memories, counterfactuals, influence_graph)
+    decision_influence_graph = _decision_influence_graph(decisions)
+    family_tree = _module_family_tree(snapshots)
+    health = _build_health(
+        snapshots,
+        events,
+        fossils,
+        turning_points,
+        memories,
+        counterfactuals,
+        influence_graph,
+        decisions,
+        decision_influence_graph,
+        family_tree,
+    )
 
     fingerprint = hashlib.sha1(f"{repo_path}:{len(commits)}:{datetime.now(timezone.utc)}".encode()).hexdigest()[:12]
     return AnalysisResult(
@@ -83,6 +102,7 @@ def analyze_repository(repo_path: Path, snapshot_size: int) -> AnalysisResult:
         repo_path=str(repo_path),
         snapshots=snapshots,
         events=events,
+        decisions=decisions,
         health=health,
     )
 
@@ -225,6 +245,11 @@ def _dna(metrics: SnapshotMetrics, graph: nx.Graph, nodes: list[GraphNode]) -> A
     hotspots = [node.hotspot_score for node in nodes]
     modularity = _modularity(graph)
     avg_depth = _average_dependency_depth(graph)
+    top_directory_edges = sum(1 for source, target in graph.edges if _directory(source) == _directory(target))
+    cross_directory_edges = graph.number_of_edges() - top_directory_edges
+    cyclic_pressure = 0.0
+    if graph.number_of_nodes() > 0:
+        cyclic_pressure = max(0, graph.number_of_edges() - graph.number_of_nodes() + nx.number_connected_components(graph)) / max(1, graph.number_of_edges())
     return ArchitectureDNA(
         modularity=round(modularity, 3),
         coupling=round(min(1, metrics.coupling_score), 3),
@@ -234,6 +259,10 @@ def _dna(metrics: SnapshotMetrics, graph: nx.Graph, nodes: list[GraphNode]) -> A
         churn_concentration=round(_gini(churns), 3),
         hotspot_concentration=round(_gini(hotspots), 3),
         centralization_score=round(max(centralities) if centralities else 0, 3),
+        hub_dominance=round(max(degrees) / max(1, sum(degrees)) if degrees else 0, 3),
+        graph_entropy=round(metrics.entropy, 3),
+        layer_separation=round(cross_directory_edges / max(1, graph.number_of_edges()), 3),
+        cyclic_dependency_score=round(cyclic_pressure, 3),
     )
 
 
@@ -379,6 +408,9 @@ def _build_health(
     memories: list[ArchitecturalMemory],
     counterfactuals: list[CounterfactualEstimate],
     influence_graph: InfluenceGraph,
+    decisions: list[ArchitecturalDecision],
+    decision_influence_graph: InfluenceGraph,
+    family_tree: ModuleFamilyTree,
 ) -> Health:
     if not snapshots:
         return Health(evolution_score=0, stability_trend=[], summary="No commits were available for analysis.")
@@ -393,10 +425,38 @@ def _build_health(
     biography = _biography(snapshots, events, archetype, forecast)
     story = _evolution_story(snapshots, events, fossils)
     report_markdown = _report_markdown(
-        snapshots, events, fossils, turning_points, memories, influence_graph, evolution_score, summary, archetype, forecast, biography, story
+        snapshots,
+        events,
+        fossils,
+        turning_points,
+        memories,
+        influence_graph,
+        decisions,
+        decision_influence_graph,
+        family_tree,
+        evolution_score,
+        summary,
+        archetype,
+        forecast,
+        biography,
+        story,
     )
     report_html = _report_html(
-        snapshots, events, fossils, turning_points, memories, influence_graph, evolution_score, summary, archetype, forecast, biography, story
+        snapshots,
+        events,
+        fossils,
+        turning_points,
+        memories,
+        influence_graph,
+        decisions,
+        decision_influence_graph,
+        family_tree,
+        evolution_score,
+        summary,
+        archetype,
+        forecast,
+        biography,
+        story,
     )
     return Health(
         evolution_score=evolution_score,
@@ -411,6 +471,9 @@ def _build_health(
         turning_points=turning_points,
         memories=memories,
         counterfactuals=counterfactuals,
+        decisions=decisions,
+        decision_influence_graph=decision_influence_graph,
+        family_tree=family_tree,
         quality_trend=[snapshot.quality_score for snapshot in snapshots],
         report_markdown=report_markdown,
         report_html=report_html,
@@ -599,7 +662,150 @@ def _turning_points(snapshots: list[Snapshot]) -> list[TurningPoint]:
     return sorted(points, key=lambda item: item.impact_score, reverse=True)[:20]
 
 
-def _counterfactuals(events: list[ArchitectureEvent]) -> list[CounterfactualEstimate]:
+def _architectural_decisions(
+    snapshots: list[Snapshot],
+    events: list[ArchitectureEvent],
+    turning_points: list[TurningPoint],
+) -> list[ArchitecturalDecision]:
+    decisions: list[ArchitecturalDecision] = []
+    turning_by_sha = {point.commit.sha: rank + 1 for rank, point in enumerate(turning_points)}
+    if events:
+        for event in events:
+            current = snapshots[event.index]
+            previous = snapshots[event.previous_index]
+            primary = event.causes[0] if event.causes else None
+            commits = event.causal_commits or current.commits[:3]
+            dependency_growth = max(0, current.metrics.dependency_count - previous.metrics.dependency_count)
+            medium = _future_delta(snapshots, event.index, 2)
+            long = _future_delta(snapshots, event.index, len(snapshots))
+            impact = (
+                abs(event.delta.get("coupling_score", 0)) * 120
+                + abs(event.delta.get("dependency_count", 0)) * 2.2
+                + abs(event.delta.get("complexity_proxy", 0)) * 8
+                + len(event.affected_modules) * 1.5
+                + long * 42
+            )
+            title = _decision_title(primary.cause if primary else "architectural shift", event.affected_modules)
+            decisions.append(
+                ArchitecturalDecision(
+                    id=f"decision-{event.index}",
+                    title=title,
+                    summary=(
+                        f"{title} around {current.label}. {event.explanation} "
+                        f"PulseCode links this to {primary.cause if primary else 'compound architectural drift'}."
+                    ),
+                    confidence=round(primary.confidence if primary else 0.52, 2),
+                    start_commit=commits[0] if commits else None,
+                    end_commit=commits[-1] if commits else None,
+                    start_snapshot=previous.index,
+                    end_snapshot=current.index,
+                    affected_modules=event.affected_modules,
+                    architectural_impact_score=round(min(100, impact), 1),
+                    causes=event.causes,
+                    supporting_commits=commits,
+                    butterfly_effect=ButterflyEffect(
+                        immediate_impact=round(abs(event.delta.get("coupling_score", 0)) * 100 + dependency_growth, 2),
+                        medium_term_impact=round(medium * 100, 2),
+                        long_term_impact=round(long * 100, 2),
+                        influence_radius=len(set(sum(event.shockwave.values(), []))) if event.shockwave else len(event.affected_modules),
+                        dependency_growth_caused=dependency_growth,
+                        future_modules_affected=_future_modules_affected(snapshots, event.index, event.affected_modules),
+                        shockwave=event.shockwave,
+                        explanation=(
+                            "Immediate impact comes from the event delta; medium and long-term impact compare later "
+                            "coupling, dependency concentration, and complexity against the decision snapshot."
+                        ),
+                        evidence=[
+                            f"Dependency delta: {event.delta.get('dependency_count', 0):.0f}",
+                            f"Coupling delta: {event.delta.get('coupling_score', 0):.3f}",
+                            f"Supporting commits: {', '.join(commit.sha for commit in commits[:4]) or 'none isolated'}",
+                        ],
+                    ),
+                    turning_point_rank=min((turning_by_sha.get(commit.sha, 999) for commit in commits), default=None),
+                )
+            )
+
+    if not decisions:
+        for point in turning_points[:8]:
+            snapshot = snapshots[point.snapshot_index]
+            modules = _commit_modules(point.commit, snapshot)
+            impact = min(100, point.impact_score)
+            cause = CausalFinding(
+                cause="lasting architectural impact",
+                confidence=0.55,
+                affected_modules=modules,
+                supporting_commits=[point.commit],
+                evidence=point.evidence + point.future_effects,
+                graph_statistics={"impact_score": point.impact_score},
+            )
+            decisions.append(
+                ArchitecturalDecision(
+                    id=f"decision-{point.snapshot_index}-{point.commit.sha}",
+                    title=_decision_title("turning point", modules),
+                    summary=f"{point.commit.message} became a measurable architectural decision because future graph shape changed after it.",
+                    confidence=0.55,
+                    start_commit=point.commit,
+                    end_commit=point.commit,
+                    start_snapshot=point.snapshot_index,
+                    end_snapshot=point.snapshot_index,
+                    affected_modules=modules,
+                    architectural_impact_score=round(impact, 1),
+                    causes=[cause],
+                    supporting_commits=[point.commit],
+                    butterfly_effect=ButterflyEffect(
+                        immediate_impact=round(point.impact_score / 3, 2),
+                        medium_term_impact=round(_future_delta(snapshots, point.snapshot_index, 2) * 100, 2),
+                        long_term_impact=round(_future_delta(snapshots, point.snapshot_index, len(snapshots)) * 100, 2),
+                        influence_radius=len(modules),
+                        dependency_growth_caused=max(0, snapshots[-1].metrics.dependency_count - snapshot.metrics.dependency_count),
+                        future_modules_affected=_future_modules_affected(snapshots, point.snapshot_index, modules),
+                        shockwave={"changed_files": modules, "neighbor_modules": [], "graph": []},
+                        explanation="Derived from a high-ranking turning point in the absence of a discrete event spike.",
+                        evidence=point.evidence,
+                    ),
+                    turning_point_rank=turning_by_sha.get(point.commit.sha),
+                )
+            )
+    return sorted(decisions, key=lambda item: item.architectural_impact_score, reverse=True)[:24]
+
+
+def _decision_influence_graph(decisions: list[ArchitecturalDecision]) -> InfluenceGraph:
+    nodes = [
+        {
+            "id": decision.id,
+            "label": decision.title,
+            "impact": decision.architectural_impact_score,
+            "confidence": decision.confidence,
+            "snapshot": decision.end_snapshot,
+        }
+        for decision in decisions
+    ]
+    edges: list[InfluenceEdge] = []
+    for source, target in combinations(sorted(decisions, key=lambda item: item.end_snapshot), 2):
+        if source.end_snapshot >= target.end_snapshot:
+            continue
+        shared_modules = set(source.affected_modules).intersection(target.affected_modules)
+        shared_causes = {cause.cause for cause in source.causes}.intersection(cause.cause for cause in target.causes)
+        if not shared_modules and not shared_causes:
+            continue
+        confidence = min(0.95, 0.38 + len(shared_modules) * 0.1 + len(shared_causes) * 0.14)
+        edges.append(
+            InfluenceEdge(
+                source_event=source.end_snapshot,
+                target_event=target.end_snapshot,
+                influence_type="decision-memory" if shared_modules else "causal-pattern",
+                confidence=round(confidence, 2),
+                explanation=(
+                    f"{source.title} influenced {target.title}; shared modules: {', '.join(sorted(shared_modules)[:4])}."
+                    if shared_modules
+                    else f"{source.title} and {target.title} share causal pattern: {', '.join(sorted(shared_causes))}."
+                ),
+            )
+        )
+    return InfluenceGraph(nodes=nodes, edges=edges)
+
+
+def _counterfactuals(events: list[ArchitectureEvent], snapshots: list[Snapshot] | None = None) -> list[CounterfactualEstimate]:
     estimates: list[CounterfactualEstimate] = []
     for event in events:
         after = event.after_metrics
@@ -619,7 +825,10 @@ def _counterfactuals(events: list[ArchitectureEvent]) -> list[CounterfactualEsti
             "density": round(max(0, after.coupling_score - coupling_delta * 0.7), 4),
             "centralization": round(max(0, actual["centralization"] * 0.35), 4),
             "complexity": round(max(0, after.complexity_proxy - complexity_delta * 0.55), 2),
+            "entropy": round(max(0, after.entropy - abs(coupling_delta) * 0.35), 3),
         }
+        actual["entropy"] = after.entropy
+        actual_timeline, alternative_timeline = _simulated_timelines(event, snapshots or [])
         estimates.append(
             CounterfactualEstimate(
                 event_index=event.index,
@@ -631,6 +840,8 @@ def _counterfactuals(events: list[ArchitectureEvent]) -> list[CounterfactualEsti
                     f"Removing t={event.index} would likely reduce {dependency_delta:.0f} dependency-edge pressure "
                     f"and dampen the dominant cause: {event.causes[0].cause if event.causes else 'unknown'}."
                 ),
+                actual_timeline=actual_timeline,
+                alternative_timeline=alternative_timeline,
             )
         )
     return estimates
@@ -658,12 +869,204 @@ def _architectural_memories(snapshots: list[Snapshot], events: list[Architecture
                     reason=f"{node.id} persisted from t={snapshot.index} and remains central/hot in the latest graph.",
                     affected_modules=[node.id],
                     supporting_commits=commits,
+                    still_active=node.id in latest_nodes,
+                    dependency_count=int(latest.centrality * max(1, len(latest_nodes))),
+                    introduced_snapshot=snapshot.index,
                 )
             )
     unique: dict[str, ArchitecturalMemory] = {}
     for memory in memories:
         unique.setdefault(memory.title, memory)
     return sorted(unique.values(), key=lambda item: item.influence_score, reverse=True)[:10]
+
+
+def _module_family_tree(snapshots: list[Snapshot]) -> ModuleFamilyTree:
+    if not snapshots:
+        return ModuleFamilyTree(nodes=[], edges=[])
+
+    first_seen: dict[str, int] = {}
+    last_seen: dict[str, int] = {}
+    directories_by_snapshot: list[dict[str, set[str]]] = []
+    for snapshot in snapshots:
+        directories: dict[str, set[str]] = defaultdict(set)
+        for node in snapshot.nodes:
+            first_seen.setdefault(node.id, snapshot.index)
+            last_seen[node.id] = snapshot.index
+            directories[_directory(node.id)].add(node.id)
+        directories_by_snapshot.append(directories)
+
+    latest_ids = {node.id for node in snapshots[-1].nodes}
+    nodes = [
+        ModuleFamilyNode(
+            id=module,
+            label=Path(module).stem,
+            introduced_snapshot=first_seen[module],
+            latest_snapshot=last_seen[module],
+            status="active" if module in latest_ids else "retired",
+            evidence=[
+                f"First seen at t={first_seen[module]}",
+                f"Last seen at t={last_seen[module]}",
+            ],
+        )
+        for module in sorted(first_seen)
+    ]
+    edges: list[ModuleFamilyEdge] = []
+    for previous, current in zip(snapshots, snapshots[1:]):
+        previous_modules = {node.id for node in previous.nodes}
+        current_modules = {node.id for node in current.nodes}
+        introduced = current_modules - previous_modules
+        retired = previous_modules - current_modules
+
+        for new_module in introduced:
+            candidates = sorted(previous_modules, key=lambda item: _module_similarity(item, new_module), reverse=True)[:2]
+            for candidate in candidates:
+                score = _module_similarity(candidate, new_module)
+                if score >= 0.32:
+                    relationship = "rename" if Path(candidate).stem == Path(new_module).stem else "abstraction"
+                    edges.append(
+                        ModuleFamilyEdge(
+                            source=candidate,
+                            target=new_module,
+                            relationship=relationship,
+                            confidence=round(score, 2),
+                            explanation=f"{new_module} appeared after {candidate}; path/name similarity suggests {relationship}.",
+                        )
+                    )
+
+        previous_dirs = directories_by_snapshot[previous.index]
+        current_dirs = directories_by_snapshot[current.index]
+        for directory, current_members in current_dirs.items():
+            previous_members = previous_dirs.get(directory, set())
+            added = current_members - previous_members
+            if len(added) >= 2 and previous_members:
+                parent = sorted(previous_members, key=lambda item: len(item))[0]
+                for child in sorted(added)[:4]:
+                    edges.append(
+                        ModuleFamilyEdge(
+                            source=parent,
+                            target=child,
+                            relationship="module split",
+                            confidence=0.58,
+                            explanation=f"{directory} expanded by multiple modules at t={current.index}, suggesting responsibility split.",
+                        )
+                    )
+
+        for retired_module in retired:
+            successors = sorted(introduced, key=lambda item: _module_similarity(retired_module, item), reverse=True)[:1]
+            if successors and _module_similarity(retired_module, successors[0]) >= 0.28:
+                edges.append(
+                    ModuleFamilyEdge(
+                        source=retired_module,
+                        target=successors[0],
+                        relationship="responsibility inheritance",
+                        confidence=round(_module_similarity(retired_module, successors[0]), 2),
+                        explanation=f"{successors[0]} appeared as {retired_module} disappeared.",
+                    )
+                )
+
+    by_id = {node.id: node for node in nodes}
+    unique_edges: dict[tuple[str, str, str], ModuleFamilyEdge] = {}
+    for edge in edges:
+        unique_edges.setdefault((edge.source, edge.target, edge.relationship), edge)
+    for edge in unique_edges.values():
+        if edge.source in by_id:
+            by_id[edge.source].descendants.append(edge.target)
+        if edge.target in by_id:
+            by_id[edge.target].ancestors.append(edge.source)
+    ranked_nodes = sorted(by_id.values(), key=lambda node: (len(node.descendants), node.latest_snapshot), reverse=True)[:80]
+    kept = {node.id for node in ranked_nodes}
+    ranked_edges = [edge for edge in unique_edges.values() if edge.source in kept and edge.target in kept][:120]
+    return ModuleFamilyTree(nodes=ranked_nodes, edges=ranked_edges)
+
+
+def _simulated_timelines(event: ArchitectureEvent, snapshots: list[Snapshot]) -> tuple[list[dict[str, float | int | str]], list[dict[str, float | int | str]]]:
+    actual: list[dict[str, float | int | str]] = []
+    alternative: list[dict[str, float | int | str]] = []
+    coupling_delta = float(event.delta.get("coupling_score", 0))
+    dependency_delta = float(event.delta.get("dependency_count", 0))
+    complexity_delta = float(event.delta.get("complexity_proxy", 0))
+    for snapshot in snapshots:
+        item = {
+            "snapshot": snapshot.index,
+            "label": snapshot.label,
+            "coupling": snapshot.metrics.coupling_score,
+            "density": snapshot.metrics.coupling_score,
+            "centrality": snapshot.dna.centralization_score if snapshot.dna else 0,
+            "entropy": snapshot.metrics.entropy,
+            "complexity": snapshot.metrics.complexity_proxy,
+        }
+        actual.append(item)
+        decay = 0 if snapshot.index < event.index else max(0.18, 0.78 - (snapshot.index - event.index) * 0.12)
+        alternative.append(
+            {
+                **item,
+                "coupling": round(max(0, snapshot.metrics.coupling_score - coupling_delta * decay), 4),
+                "density": round(max(0, snapshot.metrics.coupling_score - coupling_delta * decay), 4),
+                "centrality": round(max(0, (snapshot.dna.centralization_score if snapshot.dna else 0) - abs(coupling_delta) * decay), 4),
+                "entropy": round(max(0, snapshot.metrics.entropy - abs(coupling_delta) * decay), 4),
+                "complexity": round(max(0, snapshot.metrics.complexity_proxy - complexity_delta * decay), 2),
+                "dependency_count": round(max(0, snapshot.metrics.dependency_count - dependency_delta * decay), 2),
+            }
+        )
+    return actual, alternative
+
+
+def _future_delta(snapshots: list[Snapshot], index: int, horizon: int) -> float:
+    if index >= len(snapshots) - 1:
+        return 0.0
+    current = snapshots[index]
+    target = snapshots[min(len(snapshots) - 1, index + max(1, horizon))]
+    concentration_delta = (target.dna.dependency_concentration if target.dna else 0) - (current.dna.dependency_concentration if current.dna else 0)
+    return abs(target.metrics.coupling_score - current.metrics.coupling_score) + abs(target.metrics.complexity_proxy - current.metrics.complexity_proxy) / 10 + abs(concentration_delta)
+
+
+def _future_modules_affected(snapshots: list[Snapshot], index: int, modules: list[str]) -> list[str]:
+    if not snapshots or index >= len(snapshots):
+        return modules[:8]
+    current_modules = set(modules)
+    future: Counter[str] = Counter()
+    for snapshot in snapshots[index + 1 :]:
+        graph = nx.Graph()
+        for node in snapshot.nodes:
+            graph.add_node(node.id)
+        for edge in snapshot.edges:
+            graph.add_edge(edge.source, edge.target)
+        for module in current_modules:
+            if module in graph:
+                future.update(graph.neighbors(module))
+    return [module for module, _ in future.most_common(12)]
+
+
+def _commit_modules(commit: CommitInfo, snapshot: Snapshot) -> list[str]:
+    snapshot_modules = {node.id for node in snapshot.nodes}
+    modules = [file for file in commit.files_changed if file in snapshot_modules]
+    return modules[:8] or [node.id for node in sorted(snapshot.nodes, key=lambda item: item.hotspot_score, reverse=True)[:4]]
+
+
+def _decision_title(cause: str, modules: list[str]) -> str:
+    target = Path(modules[0]).stem.replace("_", " ").replace("-", " ").title() if modules else "Architecture"
+    if "utility" in cause or "shared" in cause:
+        return f"Introduced Shared {target}"
+    if "hub" in cause:
+        return f"Formed {target} Dependency Hub"
+    if "module extraction" in cause:
+        return f"Extracted {target} Module Boundary"
+    if "refactor" in cause:
+        return f"Refactored {target} Architecture"
+    if "directory" in cause:
+        return f"Restructured {target} Directory"
+    if "turning point" in cause:
+        return f"Committed {target} Turning Point"
+    return f"Changed {target} Architecture"
+
+
+def _module_similarity(left: str, right: str) -> float:
+    left_parts = set(Path(left).with_suffix("").parts)
+    right_parts = set(Path(right).with_suffix("").parts)
+    overlap = len(left_parts.intersection(right_parts)) / max(1, len(left_parts.union(right_parts)))
+    stem_bonus = 0.25 if Path(left).stem == Path(right).stem else 0
+    directory_bonus = 0.2 if _directory(left) == _directory(right) else 0
+    return min(1.0, overlap + stem_bonus + directory_bonus)
 
 
 def _archetype(snapshots: list[Snapshot], events: list[ArchitectureEvent]) -> str:
@@ -940,6 +1343,9 @@ def _report_markdown(
     turning_points: list[TurningPoint],
     memories: list[ArchitecturalMemory],
     influence_graph: InfluenceGraph,
+    decisions: list[ArchitecturalDecision],
+    decision_influence_graph: InfluenceGraph,
+    family_tree: ModuleFamilyTree,
     evolution_score: int,
     summary: str,
     archetype: str,
@@ -964,6 +1370,20 @@ def _report_markdown(
         "## Biography",
         "",
         biography,
+        "",
+        "## Architectural Decisions",
+        "",
+        *(_decision_lines(decisions)),
+        "",
+        "## Architectural Butterfly Effects",
+        "",
+        *(_butterfly_lines(decisions)),
+        "",
+        "## Architectural Family Tree",
+        "",
+        f"- Modules tracked: {len(family_tree.nodes)}",
+        f"- Genealogy links: {len(family_tree.edges)}",
+        *[f"- {edge.source} → {edge.target}: {edge.relationship} ({edge.confidence:.2f})" for edge in family_tree.edges[:8]],
         "",
         "## Evolution Story",
         "",
@@ -995,6 +1415,10 @@ def _report_markdown(
         "## Major Causal Chains",
         "",
         *(_influence_lines(influence_graph)),
+        "",
+        "## Decision Influence Chains",
+        "",
+        *(_influence_lines(decision_influence_graph)),
         "",
         "## Forecast",
         "",
@@ -1038,6 +1462,9 @@ def _report_html(
     turning_points: list[TurningPoint],
     memories: list[ArchitecturalMemory],
     influence_graph: InfluenceGraph,
+    decisions: list[ArchitecturalDecision],
+    decision_influence_graph: InfluenceGraph,
+    family_tree: ModuleFamilyTree,
     evolution_score: int,
     summary: str,
     archetype: str,
@@ -1066,6 +1493,18 @@ def _report_html(
     influence_rows = "".join(
         f"<tr><td>t={edge.source_event} → t={edge.target_event}</td><td>{edge.influence_type}</td><td>{edge.explanation}</td></tr>"
         for edge in influence_graph.edges
+    )
+    decision_rows = "".join(
+        f"<tr><td>{decision.title}</td><td>{decision.architectural_impact_score:.1f}</td><td>{decision.summary}</td></tr>"
+        for decision in decisions[:12]
+    )
+    decision_influence_rows = "".join(
+        f"<tr><td>t={edge.source_event} → t={edge.target_event}</td><td>{edge.influence_type}</td><td>{edge.explanation}</td></tr>"
+        for edge in decision_influence_graph.edges
+    )
+    family_rows = "".join(
+        f"<tr><td>{edge.source}</td><td>{edge.target}</td><td>{edge.relationship}</td><td>{edge.explanation}</td></tr>"
+        for edge in family_tree.edges[:20]
     )
     story_items = "".join(f"<li>{line}</li>" for line in story)
     return f"""<!doctype html>
@@ -1096,6 +1535,11 @@ def _report_html(
   <h2>Repository Overview</h2>
   <p>{summary}</p>
   <p>{biography}</p>
+  <h2>Architectural Decisions</h2>
+  <table><tr><th>Decision</th><th>Impact</th><th>Summary</th></tr>{decision_rows}</table>
+  <h2>Architectural Family Tree</h2>
+  <p>Modules tracked: {len(family_tree.nodes)}; genealogy links: {len(family_tree.edges)}.</p>
+  <table><tr><th>From</th><th>To</th><th>Relationship</th><th>Evidence</th></tr>{family_rows}</table>
   <h2>Architecture DNA</h2>
   <table>{dna_rows}</table>
   <h2>Evolution Timeline</h2>
@@ -1108,6 +1552,8 @@ def _report_html(
   <table><tr><th>Commit</th><th>Impact</th><th>Reason</th></tr>{turning_rows}</table>
   <h2>Major Causal Chains</h2>
   <table><tr><th>Chain</th><th>Type</th><th>Evidence</th></tr>{influence_rows}</table>
+  <h2>Decision Influence Chains</h2>
+  <table><tr><th>Chain</th><th>Type</th><th>Evidence</th></tr>{decision_influence_rows}</table>
   <h2>Architectural Events</h2>
   <table><tr><th>Snapshot</th><th>Severity</th><th>Explanation</th></tr>{event_rows}</table>
   <h2>Dependency Growth</h2>
@@ -1143,6 +1589,30 @@ def _memory_lines(memories: list[ArchitecturalMemory]) -> list[str]:
     return [
         f"- **{memory.title}**: influence {memory.influence_score:.1f}, still influences {memory.still_influences_percent:.1f}% of the latest graph signal. {memory.reason}"
         for memory in memories
+    ]
+
+
+def _decision_lines(decisions: list[ArchitecturalDecision]) -> list[str]:
+    if not decisions:
+        return ["No architectural decisions were isolated."]
+    lines = []
+    for decision in decisions[:12]:
+        commits = ", ".join(commit.sha for commit in decision.supporting_commits[:4]) or "none isolated"
+        lines.append(
+            f"- **{decision.title}** ({decision.architectural_impact_score:.1f}, confidence {decision.confidence:.2f}): "
+            f"{decision.summary} Supporting commits: {commits}."
+        )
+    return lines
+
+
+def _butterfly_lines(decisions: list[ArchitecturalDecision]) -> list[str]:
+    if not decisions:
+        return ["No butterfly effects were isolated."]
+    return [
+        f"- **{decision.title}**: immediate {decision.butterfly_effect.immediate_impact:.1f}, "
+        f"medium {decision.butterfly_effect.medium_term_impact:.1f}, long {decision.butterfly_effect.long_term_impact:.1f}; "
+        f"radius {decision.butterfly_effect.influence_radius}; future modules {', '.join(decision.butterfly_effect.future_modules_affected[:5]) or 'none'}."
+        for decision in decisions[:10]
     ]
 
 

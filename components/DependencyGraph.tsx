@@ -72,7 +72,12 @@ export function DependencyGraph({
           ? "graph-link highlighted"
           : "graph-link"
       )
-      .attr("stroke-width", (edge) => Math.max(1, Math.min(5, edge.weight)));
+      .attr("stroke-width", (edge) => Math.max(1, Math.min(5, edge.weight)))
+      .attr("opacity", 0)
+      .transition()
+      .duration(520)
+      .attr("opacity", 1)
+      .selection();
 
     const node = root
       .append("g")
@@ -84,11 +89,23 @@ export function DependencyGraph({
 
     node
       .append("circle")
-      .attr("r", (item) => radius(lensValue(item, lens)))
+      .attr("r", 0)
       .attr("fill", (item) => (lens === "directory" ? color(item.directory) : heat(lensValue(item, lens))))
       .attr("fill-opacity", 0.86)
       .attr("stroke", "#151814")
-      .attr("stroke-opacity", 0.2);
+      .attr("stroke-opacity", 0.2)
+      .transition()
+      .duration(620)
+      .attr("r", (item) => radius(lensValue(item, lens)));
+
+    node
+      .filter((item) => highlightedSet.has(item.id))
+      .append("circle")
+      .attr("class", "graph-shockwave")
+      .attr("r", (item) => radius(lensValue(item, lens)) + 8)
+      .attr("fill", "none")
+      .attr("stroke", "#d39b31")
+      .attr("stroke-width", 2);
 
     node
       .append("title")

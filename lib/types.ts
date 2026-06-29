@@ -22,6 +22,10 @@ export type ArchitectureDNA = {
   churn_concentration: number;
   hotspot_concentration: number;
   centralization_score: number;
+  hub_dominance: number;
+  graph_entropy: number;
+  layer_separation: number;
+  cyclic_dependency_score: number;
 };
 
 export type SpeciesClassification = {
@@ -158,6 +162,8 @@ export type CounterfactualEstimate = {
   alternative: Record<string, number>;
   estimated_delta: Record<string, number>;
   explanation: string;
+  actual_timeline: Array<Record<string, number | string>>;
+  alternative_timeline: Array<Record<string, number | string>>;
 };
 
 export type ArchitecturalMemory = {
@@ -168,6 +174,62 @@ export type ArchitecturalMemory = {
   reason: string;
   affected_modules: string[];
   supporting_commits: CommitInfo[];
+  still_active: boolean;
+  dependency_count: number;
+  introduced_snapshot: number;
+};
+
+export type ButterflyEffect = {
+  immediate_impact: number;
+  medium_term_impact: number;
+  long_term_impact: number;
+  influence_radius: number;
+  dependency_growth_caused: number;
+  future_modules_affected: string[];
+  shockwave: Record<string, string[]>;
+  explanation: string;
+  evidence: string[];
+};
+
+export type ArchitecturalDecision = {
+  id: string;
+  title: string;
+  summary: string;
+  confidence: number;
+  start_commit: CommitInfo | null;
+  end_commit: CommitInfo | null;
+  start_snapshot: number;
+  end_snapshot: number;
+  affected_modules: string[];
+  architectural_impact_score: number;
+  causes: CausalFinding[];
+  supporting_commits: CommitInfo[];
+  butterfly_effect: ButterflyEffect;
+  turning_point_rank: number | null;
+};
+
+export type ModuleFamilyNode = {
+  id: string;
+  label: string;
+  introduced_snapshot: number;
+  latest_snapshot: number;
+  status: string;
+  ancestors: string[];
+  descendants: string[];
+  evidence: string[];
+};
+
+export type ModuleFamilyEdge = {
+  source: string;
+  target: string;
+  relationship: string;
+  confidence: number;
+  explanation: string;
+};
+
+export type ModuleFamilyTree = {
+  nodes: ModuleFamilyNode[];
+  edges: ModuleFamilyEdge[];
 };
 
 export type Forecast = {
@@ -195,6 +257,9 @@ export type Health = {
   turning_points: TurningPoint[];
   memories: ArchitecturalMemory[];
   counterfactuals: CounterfactualEstimate[];
+  decisions: ArchitecturalDecision[];
+  decision_influence_graph: InfluenceGraph | null;
+  family_tree: ModuleFamilyTree | null;
   quality_trend: number[];
   report_markdown: string;
   report_html: string;

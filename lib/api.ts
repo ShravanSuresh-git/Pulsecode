@@ -1,11 +1,13 @@
 import type {
   AnalyzeResponse,
   ArchitectureDNA,
+  ArchitecturalDecision,
   ArchitecturalFossil,
   ArchitecturalMemory,
   CounterfactualEstimate,
   Health,
   InfluenceGraph,
+  ModuleFamilyTree,
   Snapshot,
   Timeline,
   TurningPoint
@@ -67,6 +69,18 @@ export function getDna(repoId: string, index: number) {
   return request<{ repo_id: string; index: number; dna: ArchitectureDNA | null }>(`/dna/${repoId}/${index}`);
 }
 
+export function compareDna(repoId: string, leftIndex: number, rightIndex: number) {
+  return request<{
+    repo_id: string;
+    left_index: number;
+    right_index: number;
+    left: ArchitectureDNA;
+    right: ArchitectureDNA;
+    delta: Record<string, number>;
+    explanation: string;
+  }>(`/dna/${repoId}/compare/${leftIndex}/${rightIndex}`);
+}
+
 export function getStory(repoId: string) {
   return request<{ repo_id: string; story: string[]; biography: string }>(`/story/${repoId}`);
 }
@@ -77,6 +91,26 @@ export function getFossils(repoId: string) {
 
 export function getCausality(repoId: string) {
   return request<{ repo_id: string; influence_graph: InfluenceGraph | null }>(`/causality/${repoId}`);
+}
+
+export function getDecisions(repoId: string) {
+  return request<{ repo_id: string; decisions: ArchitecturalDecision[] }>(`/decisions/${repoId}`);
+}
+
+export function getDecisionTimeline(repoId: string) {
+  return request<{ repo_id: string; decisions: ArchitecturalDecision[]; influence_graph: InfluenceGraph | null }>(
+    `/decision-timeline/${repoId}`
+  );
+}
+
+export function getDecisionCounterfactual(repoId: string, decisionId: string) {
+  return request<{ repo_id: string; decision: ArchitecturalDecision; counterfactual: CounterfactualEstimate }>(
+    `/decision-counterfactual/${repoId}/${decisionId}`
+  );
+}
+
+export function getFamilyTree(repoId: string) {
+  return request<{ repo_id: string; family_tree: ModuleFamilyTree }>(`/family-tree/${repoId}`);
 }
 
 export function getTurningPoints(repoId: string) {

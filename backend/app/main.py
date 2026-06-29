@@ -114,6 +114,27 @@ def dna(repo_id: str, index: int) -> dict:
     }
 
 
+@app.get("/dna/{repo_id}/compare/{left_index}/{right_index}")
+def dna_compare(repo_id: str, left_index: int, right_index: int) -> dict:
+    analysis = _get_analysis(repo_id)
+    if left_index < 0 or left_index >= len(analysis.snapshots) or right_index < 0 or right_index >= len(analysis.snapshots):
+        raise HTTPException(status_code=404, detail="Snapshot index is out of range")
+    left = analysis.snapshots[left_index]
+    right = analysis.snapshots[right_index]
+    left_dna = left.dna.model_dump() if left.dna else {}
+    right_dna = right.dna.model_dump() if right.dna else {}
+    delta = {key: round(float(right_dna.get(key, 0)) - float(left_dna.get(key, 0)), 4) for key in set(left_dna) | set(right_dna)}
+    return {
+        "repo_id": repo_id,
+        "left_index": left_index,
+        "right_index": right_index,
+        "left": left_dna,
+        "right": right_dna,
+        "delta": delta,
+        "explanation": "DNA comparison is normalized per snapshot; positive deltas indicate architectural pressure or structure increased in the right snapshot.",
+    }
+
+
 @app.get("/story/{repo_id}")
 def story(repo_id: str) -> dict:
     analysis = _get_analysis(repo_id)
@@ -133,6 +154,43 @@ def causality(repo_id: str) -> dict:
         "repo_id": repo_id,
         "events": [event.model_dump() for event in analysis.events],
         "influence_graph": analysis.health.influence_graph.model_dump() if analysis.health.influence_graph else None,
+    }
+
+
+@app.get("/decisions/{repo_id}")
+def decisions(repo_id: str) -> dict:
+    analysis = _get_analysis(repo_id)
+    return {"repo_id": repo_id, "decisions": [decision.model_dump() for decision in analysis.decisions]}
+
+
+@app.get("/decision-timeline/{repo_id}")
+def decision_timeline(repo_id: str) -> dict:
+    analysis = _get_analysis(repo_id)
+    return {
+        "repo_id": repo_id,
+        "decisions": [decision.model_dump() for decision in analysis.decisions],
+        "influence_graph": analysis.health.decision_influence_graph.model_dump() if analysis.health.decision_influence_graph else None,
+    }
+
+
+@app.get("/decision-counterfactual/{repo_id}/{decision_id}")
+def decision_counterfactual(repo_id: str, decision_id: str) -> dict:
+    analysis = _get_analysis(repo_id)
+    decision = next((item for item in analysis.decisions if item.id == decision_id), None)
+    if decision is None:
+        raise HTTPException(status_code=404, detail="No architectural decision with that id")
+    estimate = next((item for item in analysis.health.counterfactuals if item.event_index == decision.end_snapshot), None)
+    if estimate is None:
+        raise HTTPException(status_code=404, detail="No counterfactual estimate for that decision")
+    return {"repo_id": repo_id, "decision": decision.model_dump(), "counterfactual": estimate.model_dump()}
+
+
+@app.get("/family-tree/{repo_id}")
+def family_tree(repo_id: str) -> dict:
+    analysis = _get_analysis(repo_id)
+    return {
+        "repo_id": repo_id,
+        "family_tree": analysis.health.family_tree.model_dump() if analysis.health.family_tree else {"nodes": [], "edges": []},
     }
 
 
