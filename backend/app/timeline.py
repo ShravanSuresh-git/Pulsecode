@@ -3,17 +3,20 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import statistics
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 
 import networkx as nx
-import pandas as pd
 from git import Commit, Repo
 
 from .models import (
     AnalysisResult,
+    ArchitecturalFossil,
+    ArchitecturalWeather,
+    ArchitectureDNA,
     ArchitectureEvent,
     CommitInfo,
     Forecast,
@@ -22,6 +25,7 @@ from .models import (
     Health,
     Snapshot,
     SnapshotMetrics,
+    SpeciesClassification,
 )
 
 
@@ -56,8 +60,10 @@ def analyze_repository(repo_path: Path, snapshot_size: int) -> AnalysisResult:
 
     commit_infos = [_commit_info(repo, commit) for commit in commits]
     snapshots = _build_snapshots(repo_path, commit_infos, snapshot_size)
+    _enrich_snapshots(snapshots)
     events = _detect_events(snapshots)
-    health = _build_health(snapshots, events)
+    fossils = _detect_fossils(snapshots, events)
+    health = _build_health(snapshots, events, fossils)
 
     fingerprint = hashlib.sha1(f"{repo_path}:{len(commits)}:{datetime.now(timezone.utc)}".encode()).hexdigest()[:12]
     return AnalysisResult(
@@ -114,6 +120,8 @@ def _build_snapshots(repo_path: Path, commits: list[CommitInfo], snapshot_size: 
             for source, target, data in graph.edges(data=True)
         ]
         metrics = _metrics(group, graph, nodes, edges)
+        dna = _dna(metrics, graph, nodes)
+        species = _species(metrics, nodes, edges, dna)
         snapshots.append(
             Snapshot(
                 index=index,
@@ -123,12 +131,21 @@ def _build_snapshots(repo_path: Path, commits: list[CommitInfo], snapshot_size: 
                 nodes=nodes,
                 edges=edges,
                 metrics=metrics,
+                dna=dna,
+                species=species,
+                quality_score=_quality_score(metrics, dna),
             )
         )
         if end >= len(commits):
             break
 
     return snapshots
+
+
+def _enrich_snapshots(snapshots: list[Snapshot]) -> None:
+    for index, snapshot in enumerate(snapshots):
+        previous = snapshots[index - 1] if index else None
+        snapshot.weather = _weather(snapshot, previous)
 
 
 def _graph_from_state(repo_path: Path, files: set[str], cochange: Counter[tuple[str, str]]) -> nx.Graph:
@@ -190,6 +207,116 @@ def _metrics(
     )
 
 
+def _dna(metrics: SnapshotMetrics, graph: nx.Graph, nodes: list[GraphNode]) -> ArchitectureDNA:
+    degrees = [degree for _, degree in graph.degree()]
+    centralities = [node.centrality for node in nodes]
+    churns = [node.churn for node in nodes]
+    hotspots = [node.hotspot_score for node in nodes]
+    modularity = _modularity(graph)
+    avg_depth = _average_dependency_depth(graph)
+    return ArchitectureDNA(
+        modularity=round(modularity, 3),
+        coupling=round(min(1, metrics.coupling_score), 3),
+        dependency_concentration=round(_gini(degrees), 3),
+        graph_density=round(metrics.coupling_score, 3),
+        average_dependency_depth=round(avg_depth, 3),
+        churn_concentration=round(_gini(churns), 3),
+        hotspot_concentration=round(_gini(hotspots), 3),
+        centralization_score=round(max(centralities) if centralities else 0, 3),
+    )
+
+
+def _quality_score(metrics: SnapshotMetrics, dna: ArchitectureDNA) -> int:
+    raw = (
+        100
+        - dna.coupling * 26
+        - dna.dependency_concentration * 18
+        - dna.hotspot_concentration * 16
+        - dna.centralization_score * 18
+        - min(1, metrics.complexity_proxy / 12) * 12
+        + dna.modularity * 18
+        + min(1, metrics.entropy / 4) * 10
+    )
+    return int(max(0, min(100, round(raw))))
+
+
+def _species(
+    metrics: SnapshotMetrics,
+    nodes: list[GraphNode],
+    edges: list[GraphEdge],
+    dna: ArchitectureDNA,
+) -> SpeciesClassification:
+    max_centrality = dna.centralization_score
+    import_ratio = sum(1 for edge in edges if "import" in edge.kind) / max(1, len(edges))
+    root_dirs = len({node.directory for node in nodes})
+    churny = metrics.churn_score > max(200, metrics.module_count * 30)
+    reasons: list[str] = []
+
+    if churny and metrics.module_count <= 5:
+        species = "Rewrite Phase"
+        confidence = 0.72
+        reasons.append("High churn is concentrated in a small module set.")
+    elif dna.coupling > 0.68 and max_centrality > 0.58:
+        species = "Distributed Monolith"
+        confidence = 0.78
+        reasons.append("Dense dependencies and high centralization suggest distributed tight coupling.")
+    elif max_centrality > 0.72:
+        species = "Dependency Hub"
+        confidence = 0.82
+        reasons.append("One module dominates graph centrality.")
+    elif root_dirs <= 2 and metrics.module_count >= 8 and dna.coupling > 0.34:
+        species = "Modular Monolith"
+        confidence = 0.74
+        reasons.append("Many modules live inside a small number of top-level areas.")
+    elif import_ratio > 0.55 and dna.modularity > 0.45:
+        species = "Layered Architecture"
+        confidence = 0.7
+        reasons.append("Explicit import edges dominate while modules remain clustered.")
+    elif dna.churn_concentration > 0.64 and metrics.module_count > 8:
+        species = "Feature Factory"
+        confidence = 0.68
+        reasons.append("Churn is concentrated while module count keeps growing.")
+    elif max_centrality > 0.48 and dna.coupling < 0.35:
+        species = "Platform Core"
+        confidence = 0.66
+        reasons.append("A central core exists without overwhelming dependency density.")
+    elif metrics.module_count > 15 and dna.hotspot_concentration > 0.5:
+        species = "Legacy Accretion"
+        confidence = 0.65
+        reasons.append("Growth and hotspot concentration indicate accumulated complexity.")
+    elif any("util" in node.id.lower() or "shared" in node.id.lower() or "core" in node.id.lower() for node in nodes) and max_centrality > 0.35:
+        species = "Utility Core"
+        confidence = 0.62
+        reasons.append("Core/shared modules are becoming graph anchors.")
+    else:
+        species = "Healthy Modular"
+        confidence = 0.76
+        reasons.append("Coupling and concentration remain within a stable modular range.")
+
+    reasons.append(f"DNA coupling={dna.coupling:.2f}, modularity={dna.modularity:.2f}, centralization={dna.centralization_score:.2f}.")
+    return SpeciesClassification(name=species, confidence=round(confidence, 2), reasons=reasons)
+
+
+def _weather(snapshot: Snapshot, previous: Snapshot | None) -> ArchitecturalWeather:
+    if previous is None:
+        if snapshot.quality_score >= 70:
+            return ArchitecturalWeather(condition="Sunny", severity=1, explanation="The starting architecture is stable and readable.")
+        return ArchitecturalWeather(condition="Cloudy", severity=2, explanation="The starting architecture already shows structural pressure.")
+
+    coupling_delta = snapshot.metrics.coupling_score - previous.metrics.coupling_score
+    edge_delta = snapshot.metrics.dependency_count - previous.metrics.dependency_count
+    quality_delta = snapshot.quality_score - previous.quality_score
+    if coupling_delta > 0.18 or edge_delta > max(12, previous.metrics.dependency_count * 0.6):
+        return ArchitecturalWeather(condition="Hurricane", severity=5, explanation="Dependency growth is explosive in this interval.")
+    if coupling_delta > 0.08 or quality_delta < -18:
+        return ArchitecturalWeather(condition="Storm", severity=4, explanation="Coupling rose quickly and architecture quality dropped.")
+    if coupling_delta > 0.03 or edge_delta > 4:
+        return ArchitecturalWeather(condition="Cloudy", severity=3, explanation="Dependency pressure is increasing.")
+    if quality_delta > 10 or coupling_delta < -0.04:
+        return ArchitecturalWeather(condition="Clearing", severity=1, explanation="Coupling pressure is easing.")
+    return ArchitecturalWeather(condition="Sunny", severity=1, explanation="Architecture is evolving without a sharp pressure change.")
+
+
 def _detect_events(snapshots: list[Snapshot]) -> list[ArchitectureEvent]:
     events: list[ArchitectureEvent] = []
     for previous, current in zip(snapshots, snapshots[1:]):
@@ -227,22 +354,17 @@ def _detect_events(snapshots: list[Snapshot]) -> list[ArchitectureEvent]:
                         "churn_score": float(current.metrics.churn_score - previous.metrics.churn_score),
                         "complexity_proxy": round(current.metrics.complexity_proxy - previous.metrics.complexity_proxy, 2),
                     },
+                    shockwave=_shockwave(current, affected),
                 )
             )
     return events
 
 
-def _build_health(snapshots: list[Snapshot], events: list[ArchitectureEvent]) -> Health:
+def _build_health(snapshots: list[Snapshot], events: list[ArchitectureEvent], fossils: list[ArchitecturalFossil]) -> Health:
     if not snapshots:
         return Health(evolution_score=0, stability_trend=[], summary="No commits were available for analysis.")
 
-    frame = pd.DataFrame([snapshot.metrics.model_dump() for snapshot in snapshots])
-    coupling = frame["coupling_score"].fillna(0).tolist()
-    complexity = frame["complexity_proxy"].fillna(0).tolist()
-    stability_trend = [
-        round(max(0, 100 - coupling[index] * 80 - complexity[index] * 2), 1)
-        for index in range(len(snapshots))
-    ]
+    stability_trend = [float(snapshot.quality_score) for snapshot in snapshots]
     event_penalty = min(25, len(events) * 5)
     latest = stability_trend[-1] if stability_trend else 50
     evolution_score = int(max(0, min(100, latest - event_penalty)))
@@ -250,6 +372,9 @@ def _build_health(snapshots: list[Snapshot], events: list[ArchitectureEvent]) ->
     archetype = _archetype(snapshots, events)
     forecast = _forecast(snapshots)
     biography = _biography(snapshots, events, archetype, forecast)
+    story = _evolution_story(snapshots, events, fossils)
+    report_markdown = _report_markdown(snapshots, events, fossils, evolution_score, summary, archetype, forecast, biography, story)
+    report_html = _report_html(snapshots, events, fossils, evolution_score, summary, archetype, forecast, biography, story)
     return Health(
         evolution_score=evolution_score,
         stability_trend=stability_trend,
@@ -257,7 +382,11 @@ def _build_health(snapshots: list[Snapshot], events: list[ArchitectureEvent]) ->
         archetype=archetype,
         forecast=forecast,
         biography=biography,
-        report_markdown=_report_markdown(snapshots, events, evolution_score, summary, archetype, forecast, biography),
+        story=story,
+        fossils=fossils,
+        quality_trend=[snapshot.quality_score for snapshot in snapshots],
+        report_markdown=report_markdown,
+        report_html=report_html,
     )
 
 
@@ -378,21 +507,178 @@ def _biography(
     )
 
 
+def _evolution_story(
+    snapshots: list[Snapshot],
+    events: list[ArchitectureEvent],
+    fossils: list[ArchitecturalFossil],
+) -> list[str]:
+    if not snapshots:
+        return ["No commits were available, so PulseCode could not infer an evolution story."]
+    story = []
+    first = snapshots[0]
+    last = snapshots[-1]
+    story.append(
+        f"The system began as {first.species.name if first.species else 'an unclassified architecture'} "
+        f"with {first.metrics.module_count} modules and {first.metrics.dependency_count} dependencies."
+    )
+    for previous, current in zip(snapshots, snapshots[1:]):
+        coupling_delta = current.metrics.coupling_score - previous.metrics.coupling_score
+        module_delta = current.metrics.module_count - previous.metrics.module_count
+        if module_delta >= 3:
+            story.append(f"At {current.label}, the architecture expanded by {module_delta} modules, indicating feature or boundary growth.")
+        if coupling_delta > 0.08:
+            hub = _top_affected_modules(current)[:2]
+            story.append(f"At {current.label}, dependency pressure increased around {', '.join(hub)}.")
+        elif coupling_delta < -0.05:
+            story.append(f"At {current.label}, coupling eased, suggesting extraction or boundary repair.")
+        if current.species and previous.species and current.species.name != previous.species.name:
+            story.append(f"The system shifted from {previous.species.name} to {current.species.name} around {current.label}.")
+    if fossils:
+        story.append(f"{fossils[0].title} became the strongest architectural fossil with impact {fossils[0].impact_score:.1f}.")
+    if events:
+        story.append(f"{len(events)} architectural shockwave{'s' if len(events) != 1 else ''} changed the graph shape.")
+    story.append(
+        f"By the latest snapshot, the system is {last.species.name if last.species else 'unclassified'} "
+        f"with {last.weather.condition if last.weather else 'unknown'} architectural weather."
+    )
+    return story
+
+
+def _detect_fossils(snapshots: list[Snapshot], events: list[ArchitectureEvent]) -> list[ArchitecturalFossil]:
+    fossils: list[ArchitecturalFossil] = []
+    if not snapshots:
+        return fossils
+
+    hub_snapshot = max(snapshots, key=lambda snapshot: snapshot.dna.centralization_score if snapshot.dna else 0)
+    hub_node = _top_affected_modules(hub_snapshot)[:1]
+    if hub_node and hub_snapshot.dna and hub_snapshot.dna.centralization_score > 0.25:
+        fossils.append(
+            _fossil(
+                "First Dependency Hub",
+                hub_snapshot,
+                f"{hub_node[0]} became a central architectural gravity point.",
+                hub_snapshot.dna.centralization_score * 100,
+                hub_node,
+            )
+        )
+
+    if len(snapshots) > 1:
+        largest_coupling = max(
+            zip(snapshots, snapshots[1:]),
+            key=lambda pair: pair[1].metrics.coupling_score - pair[0].metrics.coupling_score,
+        )
+        delta = largest_coupling[1].metrics.coupling_score - largest_coupling[0].metrics.coupling_score
+        if delta > 0:
+            fossils.append(
+                _fossil(
+                    "Largest Coupling Increase",
+                    largest_coupling[1],
+                    f"Coupling increased by {delta:.3f} from {largest_coupling[0].label} to {largest_coupling[1].label}.",
+                    delta * 100,
+                    _top_affected_modules(largest_coupling[1])[:4],
+                )
+            )
+
+        largest_reduction = max(
+            zip(snapshots, snapshots[1:]),
+            key=lambda pair: pair[0].metrics.complexity_proxy - pair[1].metrics.complexity_proxy,
+        )
+        reduction = largest_reduction[0].metrics.complexity_proxy - largest_reduction[1].metrics.complexity_proxy
+        if reduction > 0:
+            fossils.append(
+                _fossil(
+                    "Largest Complexity Reduction",
+                    largest_reduction[1],
+                    f"Complexity dropped by {reduction:.2f}, suggesting cleanup or extraction.",
+                    reduction * 12,
+                    _top_affected_modules(largest_reduction[1])[:4],
+                )
+            )
+
+    refactor_snapshot = max(snapshots, key=lambda snapshot: snapshot.metrics.churn_score)
+    if refactor_snapshot.metrics.churn_score > 0:
+        fossils.append(
+            _fossil(
+                "Largest Refactor",
+                refactor_snapshot,
+                f"Snapshot churn reached {refactor_snapshot.metrics.churn_score} changed lines.",
+                min(100, refactor_snapshot.metrics.churn_score / 10),
+                _top_affected_modules(refactor_snapshot)[:4],
+            )
+        )
+
+    shared = next(
+        (
+            snapshot
+            for snapshot in snapshots
+            if any("shared" in node.id.lower() or "core" in node.id.lower() or "util" in node.id.lower() for node in snapshot.nodes)
+        ),
+        None,
+    )
+    if shared:
+        fossils.append(
+            _fossil(
+                "Introduction of Shared Module",
+                shared,
+                "A core/shared utility surface appeared and began shaping dependencies.",
+                54,
+                [node.id for node in shared.nodes if "shared" in node.id.lower() or "core" in node.id.lower() or "util" in node.id.lower()][:4],
+            )
+        )
+
+    for event in events:
+        fossils.append(
+            ArchitecturalFossil(
+                title=f"Architectural Shockwave at t={event.index}",
+                snapshot_index=event.index,
+                timestamp=event.timestamp,
+                reason=event.explanation,
+                impact_score=round(abs(event.delta.get("dependency_count", 0)) + abs(event.delta.get("coupling_score", 0)) * 100, 1),
+                commit=event.causal_commits[0] if event.causal_commits else None,
+                affected_modules=event.affected_modules,
+            )
+        )
+
+    unique: dict[str, ArchitecturalFossil] = {}
+    for fossil in fossils:
+        key = f"{fossil.title}:{fossil.snapshot_index}"
+        unique[key] = fossil
+    return sorted(unique.values(), key=lambda fossil: fossil.impact_score, reverse=True)[:8]
+
+
+def _fossil(title: str, snapshot: Snapshot, reason: str, impact: float, modules: list[str]) -> ArchitecturalFossil:
+    commit = max(snapshot.commits, key=lambda item: item.insertions + item.deletions, default=None)
+    return ArchitecturalFossil(
+        title=title,
+        snapshot_index=snapshot.index,
+        timestamp=snapshot.timestamp,
+        reason=reason,
+        impact_score=round(float(impact), 1),
+        commit=commit,
+        affected_modules=modules,
+    )
+
+
 def _report_markdown(
     snapshots: list[Snapshot],
     events: list[ArchitectureEvent],
+    fossils: list[ArchitecturalFossil],
     evolution_score: int,
     summary: str,
     archetype: str,
     forecast: Forecast,
     biography: str,
+    story: list[str],
 ) -> str:
+    latest = snapshots[-1] if snapshots else None
     lines = [
         "# PulseCode Evolution Report",
         "",
         f"**Evolution score:** {evolution_score}/100",
         f"**Archetype:** {archetype}",
         f"**Snapshots:** {len(snapshots)}",
+        f"**Latest species:** {latest.species.name if latest and latest.species else 'Unknown'}",
+        f"**Latest weather:** {latest.weather.condition if latest and latest.weather else 'Unknown'}",
         "",
         "## Summary",
         "",
@@ -402,12 +688,24 @@ def _report_markdown(
         "",
         biography,
         "",
+        "## Evolution Story",
+        "",
+        *[f"- {line}" for line in story],
+        "",
+        "## Architecture DNA",
+        "",
+        *(_dna_lines(latest) if latest else ["No DNA available."]),
+        "",
         "## Architectural Weather",
         "",
         f"- Coupling pressure: {forecast.coupling_pressure}",
         f"- Churn pressure: {forecast.churn_pressure}",
         f"- Likely bottlenecks: {', '.join(forecast.likely_bottlenecks) or 'none'}",
         f"- Recommendation: {forecast.recommendation}",
+        "",
+        "## Major Fossils",
+        "",
+        *(_fossil_lines(fossils)),
         "",
         "## Shift Events",
         "",
@@ -431,11 +729,160 @@ def _report_markdown(
     return "\n".join(lines)
 
 
+def _report_html(
+    snapshots: list[Snapshot],
+    events: list[ArchitectureEvent],
+    fossils: list[ArchitecturalFossil],
+    evolution_score: int,
+    summary: str,
+    archetype: str,
+    forecast: Forecast,
+    biography: str,
+    story: list[str],
+) -> str:
+    latest = snapshots[-1] if snapshots else None
+    dna_rows = "".join(f"<tr><th>{key}</th><td>{value}</td></tr>" for key, value in (latest.dna.model_dump().items() if latest and latest.dna else []))
+    fossil_rows = "".join(
+        f"<tr><td>{fossil.title}</td><td>t={fossil.snapshot_index}</td><td>{fossil.impact_score:.1f}</td><td>{fossil.reason}</td></tr>"
+        for fossil in fossils
+    )
+    event_rows = "".join(
+        f"<tr><td>t={event.index}</td><td>{event.severity}</td><td>{event.explanation}</td></tr>"
+        for event in events
+    )
+    story_items = "".join(f"<li>{line}</li>" for line in story)
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PulseCode Evolution Report</title>
+  <style>
+    body {{ font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #151814; margin: 48px; line-height: 1.5; }}
+    h1, h2 {{ letter-spacing: 0; }}
+    .hero {{ border-bottom: 1px solid #ddd6c8; padding-bottom: 24px; margin-bottom: 28px; }}
+    .score {{ font-size: 44px; font-weight: 800; color: #536b49; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 12px 0 28px; }}
+    th, td {{ border: 1px solid #ddd6c8; padding: 10px; text-align: left; vertical-align: top; }}
+    th {{ background: #f5f2ea; }}
+    .pill {{ display: inline-block; background: #f5f2ea; border: 1px solid #ddd6c8; padding: 6px 10px; border-radius: 6px; margin-right: 8px; }}
+    @media print {{ body {{ margin: 28px; }} }}
+  </style>
+</head>
+<body>
+  <section class="hero">
+    <div class="score">{evolution_score}/100</div>
+    <h1>PulseCode Evolution Report</h1>
+    <span class="pill">{archetype}</span>
+    <span class="pill">{latest.species.name if latest and latest.species else 'Unknown species'}</span>
+    <span class="pill">{latest.weather.condition if latest and latest.weather else 'Unknown weather'}</span>
+  </section>
+  <h2>Repository Overview</h2>
+  <p>{summary}</p>
+  <p>{biography}</p>
+  <h2>Architecture DNA</h2>
+  <table>{dna_rows}</table>
+  <h2>Evolution Timeline</h2>
+  <ul>{story_items}</ul>
+  <h2>Major Fossils</h2>
+  <table><tr><th>Fossil</th><th>Snapshot</th><th>Impact</th><th>Reason</th></tr>{fossil_rows}</table>
+  <h2>Architectural Events</h2>
+  <table><tr><th>Snapshot</th><th>Severity</th><th>Explanation</th></tr>{event_rows}</table>
+  <h2>Dependency Growth</h2>
+  <p>Latest dependency count: {latest.metrics.dependency_count if latest else 0}</p>
+  <h2>Complexity Growth</h2>
+  <p>Latest complexity proxy: {latest.metrics.complexity_proxy if latest else 0}</p>
+  <h2>Architectural Weather</h2>
+  <p>{forecast.recommendation}</p>
+  <h2>Future Risks</h2>
+  <p>Likely bottlenecks: {', '.join(forecast.likely_bottlenecks) or 'none'}</p>
+</body>
+</html>"""
+
+
+def _dna_lines(snapshot: Snapshot) -> list[str]:
+    if not snapshot.dna:
+        return ["No DNA available."]
+    return [f"- {key.replace('_', ' ').title()}: {value}" for key, value in snapshot.dna.model_dump().items()]
+
+
+def _fossil_lines(fossils: list[ArchitecturalFossil]) -> list[str]:
+    if not fossils:
+        return ["No architectural fossils were detected."]
+    return [f"- **{fossil.title}** at t={fossil.snapshot_index}: {fossil.reason} Impact {fossil.impact_score:.1f}." for fossil in fossils]
+
+
+def _shockwave(snapshot: Snapshot, affected: list[str]) -> dict[str, list[str]]:
+    graph = nx.Graph()
+    for node in snapshot.nodes:
+        graph.add_node(node.id)
+    for edge in snapshot.edges:
+        graph.add_edge(edge.source, edge.target)
+
+    commit_files: set[str] = set()
+    for commit in snapshot.commits:
+        commit_files.update(file for file in commit.files_changed if file in graph)
+    changed = [file for file in commit_files if file in affected or not affected][:8]
+    if not changed:
+        changed = affected[:4]
+
+    neighbors: set[str] = set()
+    outer: set[str] = set()
+    for file in changed:
+        if file not in graph:
+            continue
+        first_ring = set(graph.neighbors(file))
+        neighbors.update(first_ring)
+        for neighbor in first_ring:
+            outer.update(graph.neighbors(neighbor))
+    return {
+        "commit": [commit.sha for commit in snapshot.commits[:3]],
+        "changed_files": changed,
+        "neighbor_modules": sorted(neighbors.difference(changed))[:12],
+        "graph": sorted(outer.difference(neighbors).difference(changed))[:18],
+    }
+
+
+def _modularity(graph: nx.Graph) -> float:
+    if graph.number_of_nodes() < 3 or graph.number_of_edges() == 0:
+        return 0.0
+    try:
+        communities = list(nx.community.greedy_modularity_communities(graph))
+        return max(0.0, nx.community.modularity(graph, communities))
+    except Exception:
+        return 0.0
+
+
+def _average_dependency_depth(graph: nx.Graph) -> float:
+    if graph.number_of_nodes() < 2 or graph.number_of_edges() == 0:
+        return 0.0
+    lengths: list[int] = []
+    for component in nx.connected_components(graph):
+        subgraph = graph.subgraph(component)
+        if subgraph.number_of_nodes() < 2:
+            continue
+        path_lengths = dict(nx.all_pairs_shortest_path_length(subgraph, cutoff=6))
+        for source, targets in path_lengths.items():
+            lengths.extend(distance for target, distance in targets.items() if target != source)
+    return sum(lengths) / max(1, len(lengths))
+
+
+def _gini(values: list[float] | list[int]) -> float:
+    cleaned = sorted(float(value) for value in values if value >= 0)
+    if not cleaned or sum(cleaned) == 0:
+        return 0.0
+    total = sum(cleaned)
+    weighted = sum((index + 1) * value for index, value in enumerate(cleaned))
+    count = len(cleaned)
+    return (2 * weighted) / (count * total) - (count + 1) / count
+
+
 def _spike_threshold(snapshots: list[Snapshot], index: int, field: str) -> float:
     previous = [getattr(snapshot.metrics, field) for snapshot in snapshots[:index]]
     if not previous:
         return float("inf")
-    return float(pd.Series(previous).mean() + pd.Series(previous).std(ddof=0) * 1.4)
+    mean = statistics.fmean(previous)
+    deviation = statistics.pstdev(previous) if len(previous) > 1 else 0
+    return float(mean + deviation * 1.4)
 
 
 def _entropy(values: list[int]) -> float:

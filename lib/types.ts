@@ -13,6 +13,29 @@ export type Metrics = {
   entropy: number;
 };
 
+export type ArchitectureDNA = {
+  modularity: number;
+  coupling: number;
+  dependency_concentration: number;
+  graph_density: number;
+  average_dependency_depth: number;
+  churn_concentration: number;
+  hotspot_concentration: number;
+  centralization_score: number;
+};
+
+export type SpeciesClassification = {
+  name: string;
+  confidence: number;
+  reasons: string[];
+};
+
+export type ArchitecturalWeather = {
+  condition: string;
+  severity: number;
+  explanation: string;
+};
+
 export type CommitInfo = {
   sha: string;
   message: string;
@@ -49,6 +72,10 @@ export type Snapshot = {
   nodes: GraphNode[];
   edges: GraphEdge[];
   metrics: Metrics;
+  dna: ArchitectureDNA | null;
+  species: SpeciesClassification | null;
+  weather: ArchitecturalWeather | null;
+  quality_score: number;
 };
 
 export type Timeline = {
@@ -61,6 +88,10 @@ export type Timeline = {
     timestamp: string;
     commit_count: number;
     metrics: Metrics;
+    dna: ArchitectureDNA | null;
+    species: SpeciesClassification | null;
+    weather: ArchitecturalWeather | null;
+    quality_score: number;
   }>;
 };
 
@@ -75,6 +106,17 @@ export type ArchitectureEvent = {
   before_metrics: Metrics | null;
   after_metrics: Metrics | null;
   delta: Record<string, number>;
+  shockwave: Record<string, string[]>;
+};
+
+export type ArchitecturalFossil = {
+  title: string;
+  snapshot_index: number;
+  timestamp: string;
+  reason: string;
+  impact_score: number;
+  commit: CommitInfo | null;
+  affected_modules: string[];
 };
 
 export type Forecast = {
@@ -91,5 +133,9 @@ export type Health = {
   archetype: string;
   forecast: Forecast | null;
   biography: string;
+  story: string[];
+  fossils: ArchitecturalFossil[];
+  quality_trend: number[];
   report_markdown: string;
+  report_html: string;
 };

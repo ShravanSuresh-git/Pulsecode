@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "lint": "eslint ."
+    "lint": "eslint app components lib eslint.config.mjs next.config.mjs tailwind.config.ts"
   },
   "dependencies": {
     "@types/d3": "^7.4.3",

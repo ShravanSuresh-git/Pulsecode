@@ -1,4 +1,4 @@
-import type { AnalyzeResponse, Health, Snapshot, Timeline } from "./types";
+import type { AnalyzeResponse, ArchitectureDNA, ArchitecturalFossil, Health, Snapshot, Timeline } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
@@ -46,4 +46,20 @@ export function getSampleRepo() {
 
 export function getReport(repoId: string) {
   return request<{ repo_id: string; markdown: string }>(`/report/${repoId}`);
+}
+
+export function getReportUrl(repoId: string, format: "html" | "pdf") {
+  return `${API_BASE}/report/${repoId}?format=${format}`;
+}
+
+export function getDna(repoId: string, index: number) {
+  return request<{ repo_id: string; index: number; dna: ArchitectureDNA | null }>(`/dna/${repoId}/${index}`);
+}
+
+export function getStory(repoId: string) {
+  return request<{ repo_id: string; story: string[]; biography: string }>(`/story/${repoId}`);
+}
+
+export function getFossils(repoId: string) {
+  return request<{ repo_id: string; fossils: ArchitecturalFossil[] }>(`/fossils/${repoId}`);
 }
