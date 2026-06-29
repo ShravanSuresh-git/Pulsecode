@@ -15,17 +15,23 @@ from git import Commit, Repo
 from .models import (
     AnalysisResult,
     ArchitecturalFossil,
+    ArchitecturalMemory,
     ArchitecturalWeather,
     ArchitectureDNA,
     ArchitectureEvent,
+    CausalFinding,
+    CounterfactualEstimate,
     CommitInfo,
     Forecast,
     GraphEdge,
     GraphNode,
     Health,
+    InfluenceEdge,
+    InfluenceGraph,
     Snapshot,
     SnapshotMetrics,
     SpeciesClassification,
+    TurningPoint,
 )
 
 
@@ -62,8 +68,13 @@ def analyze_repository(repo_path: Path, snapshot_size: int) -> AnalysisResult:
     snapshots = _build_snapshots(repo_path, commit_infos, snapshot_size)
     _enrich_snapshots(snapshots)
     events = _detect_events(snapshots)
+    _attach_event_causes(events, snapshots)
     fossils = _detect_fossils(snapshots, events)
-    health = _build_health(snapshots, events, fossils)
+    turning_points = _turning_points(snapshots)
+    memories = _architectural_memories(snapshots, events)
+    counterfactuals = _counterfactuals(events)
+    influence_graph = _influence_graph(events)
+    health = _build_health(snapshots, events, fossils, turning_points, memories, counterfactuals, influence_graph)
 
     fingerprint = hashlib.sha1(f"{repo_path}:{len(commits)}:{datetime.now(timezone.utc)}".encode()).hexdigest()[:12]
     return AnalysisResult(
@@ -360,7 +371,15 @@ def _detect_events(snapshots: list[Snapshot]) -> list[ArchitectureEvent]:
     return events
 
 
-def _build_health(snapshots: list[Snapshot], events: list[ArchitectureEvent], fossils: list[ArchitecturalFossil]) -> Health:
+def _build_health(
+    snapshots: list[Snapshot],
+    events: list[ArchitectureEvent],
+    fossils: list[ArchitecturalFossil],
+    turning_points: list[TurningPoint],
+    memories: list[ArchitecturalMemory],
+    counterfactuals: list[CounterfactualEstimate],
+    influence_graph: InfluenceGraph,
+) -> Health:
     if not snapshots:
         return Health(evolution_score=0, stability_trend=[], summary="No commits were available for analysis.")
 
@@ -370,11 +389,15 @@ def _build_health(snapshots: list[Snapshot], events: list[ArchitectureEvent], fo
     evolution_score = int(max(0, min(100, latest - event_penalty)))
     summary = _summary(snapshots, events)
     archetype = _archetype(snapshots, events)
-    forecast = _forecast(snapshots)
+    forecast = _forecast(snapshots, turning_points)
     biography = _biography(snapshots, events, archetype, forecast)
     story = _evolution_story(snapshots, events, fossils)
-    report_markdown = _report_markdown(snapshots, events, fossils, evolution_score, summary, archetype, forecast, biography, story)
-    report_html = _report_html(snapshots, events, fossils, evolution_score, summary, archetype, forecast, biography, story)
+    report_markdown = _report_markdown(
+        snapshots, events, fossils, turning_points, memories, influence_graph, evolution_score, summary, archetype, forecast, biography, story
+    )
+    report_html = _report_html(
+        snapshots, events, fossils, turning_points, memories, influence_graph, evolution_score, summary, archetype, forecast, biography, story
+    )
     return Health(
         evolution_score=evolution_score,
         stability_trend=stability_trend,
@@ -384,6 +407,10 @@ def _build_health(snapshots: list[Snapshot], events: list[ArchitectureEvent], fo
         biography=biography,
         story=story,
         fossils=fossils,
+        influence_graph=influence_graph,
+        turning_points=turning_points,
+        memories=memories,
+        counterfactuals=counterfactuals,
         quality_trend=[snapshot.quality_score for snapshot in snapshots],
         report_markdown=report_markdown,
         report_html=report_html,
@@ -433,6 +460,212 @@ def _causal_commits(commits: list[CommitInfo], affected: list[str]) -> list[Comm
     return [commit for commit in ranked if affected_set.intersection(commit.files_changed)][:5]
 
 
+def _attach_event_causes(events: list[ArchitectureEvent], snapshots: list[Snapshot]) -> None:
+    for event in events:
+        current = snapshots[event.index]
+        previous = snapshots[event.previous_index]
+        event.causes = _infer_causes(event, previous, current)
+
+
+def _infer_causes(event: ArchitectureEvent, previous: Snapshot, current: Snapshot) -> list[CausalFinding]:
+    causes: list[CausalFinding] = []
+    edge_delta = current.metrics.dependency_count - previous.metrics.dependency_count
+    module_delta = current.metrics.module_count - previous.metrics.module_count
+    centrality_delta = (current.dna.centralization_score if current.dna else 0) - (previous.dna.centralization_score if previous.dna else 0)
+    churn_delta = (current.dna.churn_concentration if current.dna else 0) - (previous.dna.churn_concentration if previous.dna else 0)
+    shared_modules = [module for module in event.affected_modules if any(token in module.lower() for token in ["core", "shared", "util", "common"])]
+
+    def add(cause: str, confidence: float, evidence: list[str], modules: list[str] | None = None) -> None:
+        causes.append(
+            CausalFinding(
+                cause=cause,
+                confidence=round(max(0.1, min(0.99, confidence)), 2),
+                affected_modules=modules or event.affected_modules[:6],
+                supporting_commits=event.causal_commits,
+                evidence=evidence,
+                graph_statistics={
+                    "edge_delta": float(edge_delta),
+                    "module_delta": float(module_delta),
+                    "coupling_delta": float(event.delta.get("coupling_score", 0)),
+                    "centrality_delta": round(centrality_delta, 3),
+                    "churn_concentration_delta": round(churn_delta, 3),
+                },
+            )
+        )
+
+    if module_delta > 0 and event.delta.get("coupling_score", 0) <= 0:
+        add("module extraction", 0.62 + min(0.2, module_delta * 0.04), [f"Module count increased by {module_delta} while coupling did not rise sharply."])
+    if edge_delta > 0:
+        add("dependency introduction", 0.58 + min(0.28, edge_delta / 40), [f"Dependency count increased by {edge_delta}."])
+    if shared_modules:
+        add("utility expansion", 0.7, [f"Shared/core modules are in the affected set: {', '.join(shared_modules[:3])}."], shared_modules)
+    if churn_delta > 0.12 or current.metrics.churn_score > previous.metrics.churn_score * 1.8:
+        add("high churn concentration", 0.68, [f"Churn rose from {previous.metrics.churn_score} to {current.metrics.churn_score}."])
+    if any("co-change" in edge.kind for edge in current.edges):
+        add("repeated co-change", 0.55, ["Co-change edges participate in the resulting dependency graph."])
+    if current.metrics.churn_score > max(120, previous.metrics.churn_score * 2):
+        add("architectural refactor", 0.64, ["Snapshot churn crossed a refactor-sized threshold."])
+    if len({node.directory for node in current.nodes}) - len({node.directory for node in previous.nodes}) >= 2:
+        add("directory restructuring", 0.6, ["Top-level directory count expanded quickly."])
+    if centrality_delta > 0.12 or (current.dna and current.dna.centralization_score > 0.65):
+        add("dependency hub formation", 0.74, [f"Centralization changed by {centrality_delta:.3f}."])
+
+    return sorted(causes or [CausalFinding(
+        cause="compound architectural drift",
+        confidence=0.5,
+        affected_modules=event.affected_modules,
+        supporting_commits=event.causal_commits,
+        evidence=["No single heuristic dominated; multiple weak signals contributed."],
+        graph_statistics={"coupling_delta": float(event.delta.get("coupling_score", 0))},
+    )], key=lambda item: item.confidence, reverse=True)[:5]
+
+
+def _influence_graph(events: list[ArchitectureEvent]) -> InfluenceGraph:
+    nodes = [
+        {
+            "id": event.index,
+            "label": f"t={event.index}",
+            "severity": event.severity,
+            "primary_cause": event.causes[0].cause if event.causes else "unknown",
+            "impact": round(abs(event.delta.get("dependency_count", 0)) + abs(event.delta.get("coupling_score", 0)) * 100, 2),
+        }
+        for event in events
+    ]
+    edges: list[InfluenceEdge] = []
+    for source, target in combinations(events, 2):
+        if source.index >= target.index:
+            continue
+        shared_modules = set(source.affected_modules).intersection(target.affected_modules)
+        shared_causes = {cause.cause for cause in source.causes}.intersection(cause.cause for cause in target.causes)
+        if shared_modules or shared_causes:
+            confidence = min(0.95, 0.42 + len(shared_modules) * 0.08 + len(shared_causes) * 0.12)
+            edges.append(
+                InfluenceEdge(
+                    source_event=source.index,
+                    target_event=target.index,
+                    influence_type="module-continuity" if shared_modules else "cause-continuity",
+                    confidence=round(confidence, 2),
+                    explanation=(
+                        f"Shared affected modules: {', '.join(sorted(shared_modules)[:4])}."
+                        if shared_modules
+                        else f"Shared causal mechanism: {', '.join(sorted(shared_causes))}."
+                    ),
+                )
+            )
+    return InfluenceGraph(nodes=nodes, edges=edges)
+
+
+def _turning_points(snapshots: list[Snapshot]) -> list[TurningPoint]:
+    points: list[TurningPoint] = []
+    for snapshot in snapshots:
+        future = snapshots[snapshot.index + 1 :]
+        if not future:
+            continue
+        future_last = future[-1]
+        future_coupling = future_last.metrics.coupling_score - snapshot.metrics.coupling_score
+        future_dependency = future_last.metrics.dependency_count - snapshot.metrics.dependency_count
+        future_concentration = (future_last.dna.dependency_concentration if future_last.dna else 0) - (snapshot.dna.dependency_concentration if snapshot.dna else 0)
+        future_hotspot = (future_last.dna.hotspot_concentration if future_last.dna else 0) - (snapshot.dna.hotspot_concentration if snapshot.dna else 0)
+        base = abs(future_coupling) * 45 + abs(future_concentration) * 22 + abs(future_hotspot) * 18 + max(0, future_dependency) * 1.5
+        for commit in snapshot.commits:
+            churn_weight = math.log1p(commit.insertions + commit.deletions)
+            file_weight = len(commit.files_changed) * 0.8
+            impact = base + churn_weight + file_weight
+            effects = []
+            if future_coupling > 0.03:
+                effects.append(f"Future coupling increased by {future_coupling:.3f}.")
+            elif future_coupling < -0.03:
+                effects.append(f"Future coupling decreased by {abs(future_coupling):.3f}.")
+            if future_dependency > 0:
+                effects.append(f"Future dependency count grew by {future_dependency}.")
+            if future_concentration > 0.03:
+                effects.append(f"Dependency concentration rose by {future_concentration:.3f}.")
+            if future_hotspot > 0.03:
+                effects.append(f"Hotspot concentration rose by {future_hotspot:.3f}.")
+            points.append(
+                TurningPoint(
+                    commit=commit,
+                    snapshot_index=snapshot.index,
+                    impact_score=round(impact, 1),
+                    reason=f"Commit changed {len(commit.files_changed)} files before a measurable trajectory shift.",
+                    future_effects=effects or ["Future architecture remained comparatively stable."],
+                    evidence=[
+                        f"Commit churn: {commit.insertions + commit.deletions}",
+                        f"Snapshot quality: {snapshot.quality_score}",
+                        f"Future dependency delta: {future_dependency}",
+                    ],
+                )
+            )
+    return sorted(points, key=lambda item: item.impact_score, reverse=True)[:20]
+
+
+def _counterfactuals(events: list[ArchitectureEvent]) -> list[CounterfactualEstimate]:
+    estimates: list[CounterfactualEstimate] = []
+    for event in events:
+        after = event.after_metrics
+        if not after:
+            continue
+        coupling_delta = float(event.delta.get("coupling_score", 0))
+        dependency_delta = float(event.delta.get("dependency_count", 0))
+        complexity_delta = float(event.delta.get("complexity_proxy", 0))
+        actual = {
+            "coupling": after.coupling_score,
+            "density": after.coupling_score,
+            "centralization": max((cause.graph_statistics.get("centrality_delta", 0) for cause in event.causes), default=0.0),
+            "complexity": after.complexity_proxy,
+        }
+        alternative = {
+            "coupling": round(max(0, after.coupling_score - coupling_delta * 0.7), 4),
+            "density": round(max(0, after.coupling_score - coupling_delta * 0.7), 4),
+            "centralization": round(max(0, actual["centralization"] * 0.35), 4),
+            "complexity": round(max(0, after.complexity_proxy - complexity_delta * 0.55), 2),
+        }
+        estimates.append(
+            CounterfactualEstimate(
+                event_index=event.index,
+                approximation_note="Approximation only: PulseCode does not rewrite Git history; it dampens the event's measured graph deltas.",
+                actual=actual,
+                alternative=alternative,
+                estimated_delta={key: round(alternative[key] - actual[key], 4) for key in actual},
+                explanation=(
+                    f"Removing t={event.index} would likely reduce {dependency_delta:.0f} dependency-edge pressure "
+                    f"and dampen the dominant cause: {event.causes[0].cause if event.causes else 'unknown'}."
+                ),
+            )
+        )
+    return estimates
+
+
+def _architectural_memories(snapshots: list[Snapshot], events: list[ArchitectureEvent]) -> list[ArchitecturalMemory]:
+    memories: list[ArchitecturalMemory] = []
+    latest_nodes = {node.id for node in snapshots[-1].nodes} if snapshots else set()
+    for snapshot in snapshots:
+        for node in sorted(snapshot.nodes, key=lambda item: item.hotspot_score, reverse=True)[:4]:
+            is_memory_candidate = any(token in node.id.lower() for token in ["core", "shared", "util", "auth", "billing", "cache", "event"])
+            if not is_memory_candidate or node.id not in latest_nodes:
+                continue
+            latest = next((candidate for candidate in snapshots[-1].nodes if candidate.id == node.id), node)
+            influence = min(100.0, latest.centrality * 100 + latest.hotspot_score * 4)
+            if influence < 25:
+                continue
+            commits = [commit for commit in snapshot.commits if node.id in commit.files_changed][:3]
+            memories.append(
+                ArchitecturalMemory(
+                    title=f"{Path(node.id).stem.title()} Architectural Memory",
+                    introduced=snapshot.timestamp,
+                    still_influences_percent=round(min(100, latest.centrality * 100), 1),
+                    influence_score=round(influence, 1),
+                    reason=f"{node.id} persisted from t={snapshot.index} and remains central/hot in the latest graph.",
+                    affected_modules=[node.id],
+                    supporting_commits=commits,
+                )
+            )
+    unique: dict[str, ArchitecturalMemory] = {}
+    for memory in memories:
+        unique.setdefault(memory.title, memory)
+    return sorted(unique.values(), key=lambda item: item.influence_score, reverse=True)[:10]
+
+
 def _archetype(snapshots: list[Snapshot], events: list[ArchitectureEvent]) -> str:
     if len(snapshots) < 2:
         return "Seed Architecture"
@@ -454,7 +687,7 @@ def _archetype(snapshots: list[Snapshot], events: list[ArchitectureEvent]) -> st
     return "Steady Modular Growth"
 
 
-def _forecast(snapshots: list[Snapshot]) -> Forecast:
+def _forecast(snapshots: list[Snapshot], turning_points: list[TurningPoint] | None = None) -> Forecast:
     if not snapshots:
         return Forecast(
             coupling_pressure="unknown",
@@ -470,18 +703,59 @@ def _forecast(snapshots: list[Snapshot]) -> Forecast:
     coupling_pressure = "rising" if coupling_delta > 0.04 else "falling" if coupling_delta < -0.04 else "stable"
     churn_pressure = "high" if churn_avg > 500 else "moderate" if churn_avg > 120 else "low"
     bottlenecks = [node.id for node in sorted(snapshots[-1].nodes, key=lambda node: node.hotspot_score, reverse=True)[:5]]
+    future_coupling = _linear_forecast([snapshot.metrics.coupling_score for snapshot in snapshots])
+    future_density = _linear_forecast([snapshot.dna.graph_density if snapshot.dna else snapshot.metrics.coupling_score for snapshot in snapshots])
+    future_dependency_concentration = _linear_forecast([snapshot.dna.dependency_concentration if snapshot.dna else 0 for snapshot in snapshots])
+    future_hotspots = [node.id for node in sorted(snapshots[-1].nodes, key=lambda node: (node.hotspot_score, node.centrality), reverse=True)[:5]]
     if coupling_pressure == "rising":
         recommendation = "Inspect the highlighted bottlenecks before new feature work lands; coupling is trending upward."
     elif churn_pressure == "high":
         recommendation = "Stabilize churn hotspots with tests or boundaries before extending the architecture."
     else:
         recommendation = "The current trajectory looks stable; keep watching high-centrality modules for drift."
+    supporting = [point.commit for point in (turning_points or [])[:3]]
+    explanations = [
+        CausalFinding(
+            cause="linear evolution forecast",
+            confidence=0.67 if len(snapshots) >= 4 else 0.48,
+            affected_modules=future_hotspots,
+            supporting_commits=supporting,
+            evidence=[
+                f"Observed coupling series: {[snapshot.metrics.coupling_score for snapshot in snapshots][-5:]}",
+                f"Recent churn average: {churn_avg:.1f}",
+                f"Latest dependency concentration: {(snapshots[-1].dna.dependency_concentration if snapshots[-1].dna else 0):.3f}",
+            ],
+            graph_statistics={
+                "future_coupling": future_coupling,
+                "future_graph_density": future_density,
+                "future_dependency_concentration": future_dependency_concentration,
+            },
+        )
+    ]
     return Forecast(
         coupling_pressure=coupling_pressure,
         churn_pressure=churn_pressure,
         likely_bottlenecks=bottlenecks,
         recommendation=recommendation,
+        future_coupling=future_coupling,
+        future_graph_density=future_density,
+        future_dependency_concentration=future_dependency_concentration,
+        future_hotspot_modules=future_hotspots,
+        explanations=explanations,
     )
+
+
+def _linear_forecast(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return round(values[0], 4)
+    xs = list(range(len(values)))
+    x_mean = statistics.fmean(xs)
+    y_mean = statistics.fmean(values)
+    denominator = sum((x - x_mean) ** 2 for x in xs) or 1
+    slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, values)) / denominator
+    return round(max(0.0, min(1.0, values[-1] + slope)), 4)
 
 
 def _biography(
@@ -663,6 +937,9 @@ def _report_markdown(
     snapshots: list[Snapshot],
     events: list[ArchitectureEvent],
     fossils: list[ArchitecturalFossil],
+    turning_points: list[TurningPoint],
+    memories: list[ArchitecturalMemory],
+    influence_graph: InfluenceGraph,
     evolution_score: int,
     summary: str,
     archetype: str,
@@ -707,6 +984,29 @@ def _report_markdown(
         "",
         *(_fossil_lines(fossils)),
         "",
+        "## Architectural Memories",
+        "",
+        *(_memory_lines(memories)),
+        "",
+        "## Turning Points",
+        "",
+        *(_turning_point_lines(turning_points)),
+        "",
+        "## Major Causal Chains",
+        "",
+        *(_influence_lines(influence_graph)),
+        "",
+        "## Forecast",
+        "",
+        f"- Future coupling: {forecast.future_coupling}",
+        f"- Future graph density: {forecast.future_graph_density}",
+        f"- Future dependency concentration: {forecast.future_dependency_concentration}",
+        f"- Future hotspot modules: {', '.join(forecast.future_hotspot_modules) or 'none'}",
+        "",
+        "## Suggested Refactors",
+        "",
+        *(_suggested_refactors(forecast, memories, turning_points)),
+        "",
         "## Shift Events",
         "",
     ]
@@ -719,6 +1019,8 @@ def _report_markdown(
                 f"### t={event.index} ({event.severity})",
                 "",
                 event.explanation,
+                "",
+                f"**Likely causes:** {', '.join(cause.cause for cause in event.causes) or 'Unknown'}",
                 "",
                 f"**Affected modules:** {', '.join(event.affected_modules)}",
                 "",
@@ -733,6 +1035,9 @@ def _report_html(
     snapshots: list[Snapshot],
     events: list[ArchitectureEvent],
     fossils: list[ArchitecturalFossil],
+    turning_points: list[TurningPoint],
+    memories: list[ArchitecturalMemory],
+    influence_graph: InfluenceGraph,
     evolution_score: int,
     summary: str,
     archetype: str,
@@ -747,8 +1052,20 @@ def _report_html(
         for fossil in fossils
     )
     event_rows = "".join(
-        f"<tr><td>t={event.index}</td><td>{event.severity}</td><td>{event.explanation}</td></tr>"
+        f"<tr><td>t={event.index}</td><td>{event.severity}</td><td>{event.explanation}<br><strong>Causes:</strong> {', '.join(cause.cause for cause in event.causes)}</td></tr>"
         for event in events
+    )
+    memory_rows = "".join(
+        f"<tr><td>{memory.title}</td><td>{memory.influence_score:.1f}</td><td>{memory.reason}</td></tr>"
+        for memory in memories
+    )
+    turning_rows = "".join(
+        f"<tr><td>{point.commit.sha}</td><td>{point.impact_score:.1f}</td><td>{point.reason}</td></tr>"
+        for point in turning_points[:12]
+    )
+    influence_rows = "".join(
+        f"<tr><td>t={edge.source_event} → t={edge.target_event}</td><td>{edge.influence_type}</td><td>{edge.explanation}</td></tr>"
+        for edge in influence_graph.edges
     )
     story_items = "".join(f"<li>{line}</li>" for line in story)
     return f"""<!doctype html>
@@ -785,6 +1102,12 @@ def _report_html(
   <ul>{story_items}</ul>
   <h2>Major Fossils</h2>
   <table><tr><th>Fossil</th><th>Snapshot</th><th>Impact</th><th>Reason</th></tr>{fossil_rows}</table>
+  <h2>Architectural Memories</h2>
+  <table><tr><th>Memory</th><th>Influence</th><th>Reason</th></tr>{memory_rows}</table>
+  <h2>Turning Points</h2>
+  <table><tr><th>Commit</th><th>Impact</th><th>Reason</th></tr>{turning_rows}</table>
+  <h2>Major Causal Chains</h2>
+  <table><tr><th>Chain</th><th>Type</th><th>Evidence</th></tr>{influence_rows}</table>
   <h2>Architectural Events</h2>
   <table><tr><th>Snapshot</th><th>Severity</th><th>Explanation</th></tr>{event_rows}</table>
   <h2>Dependency Growth</h2>
@@ -795,6 +1118,9 @@ def _report_html(
   <p>{forecast.recommendation}</p>
   <h2>Future Risks</h2>
   <p>Likely bottlenecks: {', '.join(forecast.likely_bottlenecks) or 'none'}</p>
+  <p>Future coupling: {forecast.future_coupling}; future density: {forecast.future_graph_density}; future dependency concentration: {forecast.future_dependency_concentration}.</p>
+  <h2>Suggested Refactors</h2>
+  <ul>{"".join(f"<li>{item}</li>" for item in _suggested_refactors(forecast, memories, turning_points))}</ul>
 </body>
 </html>"""
 
@@ -809,6 +1135,50 @@ def _fossil_lines(fossils: list[ArchitecturalFossil]) -> list[str]:
     if not fossils:
         return ["No architectural fossils were detected."]
     return [f"- **{fossil.title}** at t={fossil.snapshot_index}: {fossil.reason} Impact {fossil.impact_score:.1f}." for fossil in fossils]
+
+
+def _memory_lines(memories: list[ArchitecturalMemory]) -> list[str]:
+    if not memories:
+        return ["No persistent architectural memories were detected."]
+    return [
+        f"- **{memory.title}**: influence {memory.influence_score:.1f}, still influences {memory.still_influences_percent:.1f}% of the latest graph signal. {memory.reason}"
+        for memory in memories
+    ]
+
+
+def _turning_point_lines(turning_points: list[TurningPoint]) -> list[str]:
+    if not turning_points:
+        return ["No turning points were detected."]
+    return [
+        f"- **{point.commit.sha}** ({point.impact_score:.1f}): {point.reason} {' '.join(point.future_effects[:2])}"
+        for point in turning_points[:12]
+    ]
+
+
+def _influence_lines(influence_graph: InfluenceGraph) -> list[str]:
+    if not influence_graph.edges:
+        return ["No event-to-event influence chain was strong enough to isolate."]
+    return [
+        f"- t={edge.source_event} → t={edge.target_event} ({edge.confidence:.2f}): {edge.explanation}"
+        for edge in influence_graph.edges
+    ]
+
+
+def _suggested_refactors(
+    forecast: Forecast,
+    memories: list[ArchitecturalMemory],
+    turning_points: list[TurningPoint],
+) -> list[str]:
+    suggestions = []
+    if forecast.future_coupling and forecast.future_coupling > 0.55:
+        suggestions.append("Introduce an explicit boundary around the forecast hotspot modules before coupling crosses the high-risk range.")
+    if forecast.future_dependency_concentration and forecast.future_dependency_concentration > 0.45:
+        suggestions.append("Split or document dependency hub responsibilities; dependency concentration is forecast to remain high.")
+    for memory in memories[:2]:
+        suggestions.append(f"Review {memory.title}: it still exerts architectural memory and may need a clearer ownership boundary.")
+    if turning_points:
+        suggestions.append(f"Use {turning_points[0].commit.sha} as a case study for future refactors; it had the highest long-term influence.")
+    return suggestions or ["No urgent refactor is suggested; continue monitoring forecast hotspots."]
 
 
 def _shockwave(snapshot: Snapshot, affected: list[str]) -> dict[str, list[str]]:

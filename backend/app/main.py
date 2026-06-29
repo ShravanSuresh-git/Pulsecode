@@ -126,6 +126,43 @@ def fossils(repo_id: str) -> dict:
     return {"repo_id": repo_id, "fossils": [fossil.model_dump() for fossil in analysis.health.fossils]}
 
 
+@app.get("/causality/{repo_id}")
+def causality(repo_id: str) -> dict:
+    analysis = _get_analysis(repo_id)
+    return {
+        "repo_id": repo_id,
+        "events": [event.model_dump() for event in analysis.events],
+        "influence_graph": analysis.health.influence_graph.model_dump() if analysis.health.influence_graph else None,
+    }
+
+
+@app.get("/turning-points/{repo_id}")
+def turning_points(repo_id: str) -> dict:
+    analysis = _get_analysis(repo_id)
+    return {"repo_id": repo_id, "turning_points": [point.model_dump() for point in analysis.health.turning_points]}
+
+
+@app.get("/memories/{repo_id}")
+def memories(repo_id: str) -> dict:
+    analysis = _get_analysis(repo_id)
+    return {"repo_id": repo_id, "memories": [memory.model_dump() for memory in analysis.health.memories]}
+
+
+@app.get("/counterfactual/{repo_id}/{event_index}")
+def counterfactual(repo_id: str, event_index: int) -> dict:
+    analysis = _get_analysis(repo_id)
+    estimate = next((item for item in analysis.health.counterfactuals if item.event_index == event_index), None)
+    if estimate is None:
+        raise HTTPException(status_code=404, detail="No counterfactual estimate for that event")
+    return {"repo_id": repo_id, "counterfactual": estimate.model_dump()}
+
+
+@app.get("/forecast/{repo_id}")
+def forecast(repo_id: str) -> dict:
+    analysis = _get_analysis(repo_id)
+    return {"repo_id": repo_id, "forecast": analysis.health.forecast.model_dump() if analysis.health.forecast else None}
+
+
 @app.get("/health/{repo_id}")
 def health(repo_id: str) -> dict:
     analysis = _get_analysis(repo_id)

@@ -107,6 +107,29 @@ export type ArchitectureEvent = {
   after_metrics: Metrics | null;
   delta: Record<string, number>;
   shockwave: Record<string, string[]>;
+  causes: CausalFinding[];
+};
+
+export type CausalFinding = {
+  cause: string;
+  confidence: number;
+  affected_modules: string[];
+  supporting_commits: CommitInfo[];
+  evidence: string[];
+  graph_statistics: Record<string, number>;
+};
+
+export type InfluenceEdge = {
+  source_event: number;
+  target_event: number;
+  influence_type: string;
+  confidence: number;
+  explanation: string;
+};
+
+export type InfluenceGraph = {
+  nodes: Array<Record<string, string | number>>;
+  edges: InfluenceEdge[];
 };
 
 export type ArchitecturalFossil = {
@@ -119,11 +142,44 @@ export type ArchitecturalFossil = {
   affected_modules: string[];
 };
 
+export type TurningPoint = {
+  commit: CommitInfo;
+  snapshot_index: number;
+  impact_score: number;
+  reason: string;
+  future_effects: string[];
+  evidence: string[];
+};
+
+export type CounterfactualEstimate = {
+  event_index: number;
+  approximation_note: string;
+  actual: Record<string, number>;
+  alternative: Record<string, number>;
+  estimated_delta: Record<string, number>;
+  explanation: string;
+};
+
+export type ArchitecturalMemory = {
+  title: string;
+  introduced: string;
+  still_influences_percent: number;
+  influence_score: number;
+  reason: string;
+  affected_modules: string[];
+  supporting_commits: CommitInfo[];
+};
+
 export type Forecast = {
   coupling_pressure: string;
   churn_pressure: string;
   likely_bottlenecks: string[];
   recommendation: string;
+  future_coupling: number | null;
+  future_graph_density: number | null;
+  future_dependency_concentration: number | null;
+  future_hotspot_modules: string[];
+  explanations: CausalFinding[];
 };
 
 export type Health = {
@@ -135,6 +191,10 @@ export type Health = {
   biography: string;
   story: string[];
   fossils: ArchitecturalFossil[];
+  influence_graph: InfluenceGraph | null;
+  turning_points: TurningPoint[];
+  memories: ArchitecturalMemory[];
+  counterfactuals: CounterfactualEstimate[];
   quality_trend: number[];
   report_markdown: string;
   report_html: string;

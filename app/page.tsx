@@ -351,6 +351,7 @@ export default function Home() {
 
         <aside className="flex flex-col gap-5">
           <WeatherPanel health={health} snapshot={snapshot} onExport={exportReportAs} canExport={Boolean(repoId)} />
+          <WhyPanel health={health} selectedEvent={selectedEvent} />
           <MetricsPanel snapshot={snapshot} />
           <div className="rounded-md border border-ink/10 bg-white p-4 shadow-soft">
             <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Evolution Signal</h2>
@@ -496,6 +497,11 @@ function EventsPanel({
                 </span>
               </div>
               <span className="text-ink/70">{event.explanation}</span>
+              {event.causes.length > 0 ? (
+                <div className="mt-2 rounded-md bg-cobalt/10 p-2 text-xs text-ink/70">
+                  Why: {event.causes[0].cause} ({Math.round(event.causes[0].confidence * 100)}%)
+                </div>
+              ) : null}
               {event.causal_commits.length > 0 ? (
                 <div className="mt-2 border-t border-ink/10 pt-2 text-xs text-ink/55">
                   {event.causal_commits.slice(0, 2).map((commit) => (
@@ -616,6 +622,64 @@ function WeatherPanel({
   );
 }
 
+function WhyPanel({ health, selectedEvent }: { health: Health | null; selectedEvent: ArchitectureEvent | null }) {
+  const topTurningPoint = health?.turning_points[0];
+  const topMemory = health?.memories[0];
+  const counterfactual = selectedEvent
+    ? health?.counterfactuals.find((item) => item.event_index === selectedEvent.index)
+    : health?.counterfactuals[0];
+  const influence = health?.influence_graph?.edges[0];
+  return (
+    <div className="rounded-md border border-ink/10 bg-white p-4 shadow-soft">
+      <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Why Engine</h2>
+      <div className="mt-3 flex flex-col gap-3">
+        <ResearchCard
+          title="Likely Cause"
+          value={selectedEvent?.causes[0]?.cause ?? "Select an event"}
+          detail={selectedEvent?.causes[0]?.evidence[0] ?? "PulseCode infers causal mechanisms for each architectural event."}
+        />
+        <ResearchCard
+          title="Turning Point"
+          value={topTurningPoint ? `${topTurningPoint.commit.sha} · ${topTurningPoint.impact_score.toFixed(1)}` : "No turning point yet"}
+          detail={topTurningPoint?.reason ?? "Commits are ranked by long-term architectural influence."}
+        />
+        <ResearchCard
+          title="Architectural Memory"
+          value={topMemory?.title ?? "No persistent memory yet"}
+          detail={topMemory?.reason ?? "Persistent decisions appear when modules keep shaping the latest graph."}
+        />
+        <ResearchCard
+          title="Counterfactual"
+          value={counterfactual ? `Without t=${counterfactual.event_index}` : "No counterfactual yet"}
+          detail={counterfactual?.explanation ?? "Counterfactuals approximate graph metrics without rewriting Git history."}
+        />
+        <ResearchCard
+          title="Influence Chain"
+          value={influence ? `t=${influence.source_event} → t=${influence.target_event}` : "No chain isolated"}
+          detail={influence?.explanation ?? "Event DAG edges appear when causes or affected modules persist into future events."}
+        />
+        {health?.forecast?.explanations[0] ? (
+          <ResearchCard
+            title="Forecast Evidence"
+            value={`Future coupling ${health.forecast.future_coupling}`}
+            detail={health.forecast.explanations[0].evidence[0]}
+          />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ResearchCard({ title, value, detail }: { title: string; value: string; detail: string }) {
+  return (
+    <div className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
+      <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">{title}</div>
+      <div className="mt-1 text-sm font-semibold text-ink">{value}</div>
+      <div className="mt-1 text-xs leading-5 text-ink/60">{detail}</div>
+    </div>
+  );
+}
+
 function TimePortal({
   before,
   after,
@@ -680,6 +744,19 @@ function TimePortal({
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <DiffList title="New Edges" items={newEdges.slice(0, 8)} empty="No new edges isolated." />
         <DiffList title="Removed Edges" items={removedEdges.slice(0, 8)} empty="No removed edges isolated." />
+      </div>
+      <div className="mt-4 rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
+        <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Causal Inference</div>
+        <div className="mt-2 grid gap-2 md:grid-cols-2">
+          {event.causes.slice(0, 4).map((cause) => (
+            <div key={cause.cause} className="rounded-md bg-white p-2 text-sm">
+              <div className="font-semibold text-ink">
+                {cause.cause} · {Math.round(cause.confidence * 100)}%
+              </div>
+              <div className="mt-1 text-xs text-ink/60">{cause.evidence[0]}</div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

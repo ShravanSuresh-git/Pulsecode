@@ -1,4 +1,15 @@
-import type { AnalyzeResponse, ArchitectureDNA, ArchitecturalFossil, Health, Snapshot, Timeline } from "./types";
+import type {
+  AnalyzeResponse,
+  ArchitectureDNA,
+  ArchitecturalFossil,
+  ArchitecturalMemory,
+  CounterfactualEstimate,
+  Health,
+  InfluenceGraph,
+  Snapshot,
+  Timeline,
+  TurningPoint
+} from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
@@ -62,4 +73,20 @@ export function getStory(repoId: string) {
 
 export function getFossils(repoId: string) {
   return request<{ repo_id: string; fossils: ArchitecturalFossil[] }>(`/fossils/${repoId}`);
+}
+
+export function getCausality(repoId: string) {
+  return request<{ repo_id: string; influence_graph: InfluenceGraph | null }>(`/causality/${repoId}`);
+}
+
+export function getTurningPoints(repoId: string) {
+  return request<{ repo_id: string; turning_points: TurningPoint[] }>(`/turning-points/${repoId}`);
+}
+
+export function getMemories(repoId: string) {
+  return request<{ repo_id: string; memories: ArchitecturalMemory[] }>(`/memories/${repoId}`);
+}
+
+export function getCounterfactual(repoId: string, eventIndex: number) {
+  return request<{ repo_id: string; counterfactual: CounterfactualEstimate }>(`/counterfactual/${repoId}/${eventIndex}`);
 }
