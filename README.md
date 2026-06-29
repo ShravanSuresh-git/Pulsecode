@@ -2,6 +2,8 @@
 
 PulseCode is a local-first software evolution time machine. It analyzes a single Git repository, builds chronological architecture snapshots, and visualizes how files, dependencies, coupling, churn, and structural shift events evolve over time.
 
+![PulseCode demo](docs/pulsecode-demo.gif)
+
 ## Stack
 
 - Backend: Python 3.11+, FastAPI, GitPython, NetworkX, Pandas
@@ -40,3 +42,6 @@ Open `http://localhost:3000`.
 - `GET /events/{repo_id}`
 - `GET /health/{repo_id}`
 
+## Product Direction
+
+PulseCode should feel less like a dashboard and more like an architectural replay engine. See [docs/VISION.md](docs/VISION.md) for the next product bets.
