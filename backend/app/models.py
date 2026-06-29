@@ -20,6 +20,8 @@ class GraphNode(BaseModel):
     churn: int
     commits: int
     complexity: float
+    centrality: float = 0
+    hotspot_score: float = 0
 
 
 class GraphEdge(BaseModel):
@@ -50,16 +52,32 @@ class Snapshot(BaseModel):
 
 class ArchitectureEvent(BaseModel):
     index: int
+    previous_index: int
     timestamp: str
     severity: str
     explanation: str
     affected_modules: list[str]
+    causal_commits: list[CommitInfo] = []
+    before_metrics: SnapshotMetrics | None = None
+    after_metrics: SnapshotMetrics | None = None
+    delta: dict[str, float] = {}
+
+
+class Forecast(BaseModel):
+    coupling_pressure: str
+    churn_pressure: str
+    likely_bottlenecks: list[str]
+    recommendation: str
 
 
 class Health(BaseModel):
     evolution_score: int
     stability_trend: list[float]
     summary: str
+    archetype: str = "Unknown"
+    forecast: Forecast | None = None
+    biography: str = ""
+    report_markdown: str = ""
 
 
 class AnalysisResult(BaseModel):
@@ -69,4 +87,3 @@ class AnalysisResult(BaseModel):
     snapshots: list[Snapshot]
     events: list[ArchitectureEvent]
     health: Health
-

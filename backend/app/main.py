@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .models import AnalysisResult
+from .sample_repo import ensure_sample_repo
 from .storage import analyses
 from .timeline import analyze_repository
 
@@ -30,6 +31,12 @@ app.add_middleware(
 @app.get("/")
 def root() -> dict[str, str]:
     return {"name": "PulseCode", "status": "ready"}
+
+
+@app.get("/sample-repo")
+def sample_repo() -> dict[str, str]:
+    path = ensure_sample_repo()
+    return {"repo_path": str(path), "name": path.name}
 
 
 @app.post("/analyze")
@@ -93,9 +100,14 @@ def health(repo_id: str) -> dict:
     return analysis.health.model_dump()
 
 
+@app.get("/report/{repo_id}")
+def report(repo_id: str) -> dict[str, str]:
+    analysis = _get_analysis(repo_id)
+    return {"repo_id": repo_id, "markdown": analysis.health.report_markdown}
+
+
 def _get_analysis(repo_id: str) -> AnalysisResult:
     analysis = analyses.get(repo_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="Unknown repo_id. Run /analyze first.")
     return analysis
-

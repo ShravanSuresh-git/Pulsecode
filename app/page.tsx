@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Activity, GitBranch, Play, RotateCcw, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, Download, Flame, GitBranch, Layers, Pause, Play, RotateCcw, Search, Sparkles } from "lucide-react";
 import {
   Area,
   AreaChart,
@@ -11,7 +11,7 @@ import {
   YAxis
 } from "recharts";
 import { DependencyGraph } from "../components/DependencyGraph";
-import { analyzeRepo, getEvents, getHealth, getSnapshot, getTimeline } from "../lib/api";
+import { analyzeRepo, getEvents, getHealth, getReport, getSampleRepo, getSnapshot, getTimeline } from "../lib/api";
 import type { ArchitectureEvent, Health, Snapshot, Timeline } from "../lib/types";
 
 const samplePath = "/Users/shravan/Documents/Pulsecode";
@@ -26,13 +26,17 @@ export default function Home() {
   const [health, setHealth] = useState<Health | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [selectedEvent, setSelectedEvent] = useState<ArchitectureEvent | null>(null);
+  const [beforeSnapshot, setBeforeSnapshot] = useState<Snapshot | null>(null);
+  const [lens, setLens] = useState<"directory" | "churn" | "centrality" | "complexity" | "hotspot">("directory");
+  const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function runAnalysis() {
     setLoading(true);
     setError(null);
-    setSelectedEvent(null);
+      setSelectedEvent(null);
+      setBeforeSnapshot(null);
     try {
       const analysis = await analyzeRepo(repoPath, snapshotSize);
       const [nextTimeline, nextEvents, nextHealth] = await Promise.all([
@@ -54,12 +58,77 @@ export default function Home() {
     }
   }
 
-  async function moveTo(index: number) {
+  const moveTo = useCallback(async (index: number) => {
     if (!repoId) return;
     setActiveIndex(index);
     const nextSnapshot = await getSnapshot(repoId, index);
     setSnapshot(nextSnapshot);
+  }, [repoId]);
+
+  async function loadSample() {
+    setLoading(true);
+    setError(null);
+    try {
+      const sample = await getSampleRepo();
+      setRepoPath(sample.repo_path);
+      setSnapshotSize(2);
+      const analysis = await analyzeRepo(sample.repo_path, 2);
+      const [nextTimeline, nextEvents, nextHealth] = await Promise.all([
+        getTimeline(analysis.repo_id),
+        getEvents(analysis.repo_id),
+        getHealth(analysis.repo_id)
+      ]);
+      const firstSnapshot = analysis.snapshot_count > 0 ? await getSnapshot(analysis.repo_id, 0) : null;
+      setRepoId(analysis.repo_id);
+      setTimeline(nextTimeline);
+      setEvents(nextEvents.events);
+      setHealth(nextHealth);
+      setSnapshot(firstSnapshot);
+      setActiveIndex(0);
+      setSelectedEvent(null);
+      setBeforeSnapshot(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sample analysis failed");
+    } finally {
+      setLoading(false);
+    }
   }
+
+  async function selectEvent(event: ArchitectureEvent) {
+    setSelectedEvent(event);
+    if (repoId) {
+      const [before, after] = await Promise.all([
+        getSnapshot(repoId, event.previous_index),
+        getSnapshot(repoId, event.index)
+      ]);
+      setBeforeSnapshot(before);
+      setSnapshot(after);
+      setActiveIndex(event.index);
+    }
+  }
+
+  async function exportReport() {
+    if (!repoId) return;
+    const report = await getReport(repoId);
+    const blob = new Blob([report.markdown], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${timeline?.repo_name ?? "pulsecode"}-evolution-report.md`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  const maxIndex = Math.max(0, (timeline?.snapshots.length ?? 1) - 1);
+
+  useEffect(() => {
+    if (!playing || !timeline || maxIndex === 0) return;
+    const timer = window.setInterval(() => {
+      const next = activeIndex >= maxIndex ? 0 : activeIndex + 1;
+      moveTo(next);
+    }, 1400);
+    return () => window.clearInterval(timer);
+  }, [activeIndex, maxIndex, moveTo, playing, timeline]);
 
   const chartData = useMemo(
     () =>
@@ -72,8 +141,7 @@ export default function Home() {
     [timeline]
   );
 
-  const highlighted = selectedEvent?.affected_modules ?? [];
-  const maxIndex = Math.max(0, (timeline?.snapshots.length ?? 1) - 1);
+  const highlighted = selectedEvent?.affected_modules ?? health?.forecast?.likely_bottlenecks ?? [];
 
   return (
     <main className="min-h-screen bg-paper">
@@ -96,6 +164,14 @@ export default function Home() {
             >
               {loading ? <RotateCcw className="animate-spin" size={18} /> : <Play size={18} />}
               {loading ? "Analyzing" : "Analyze"}
+            </button>
+            <button
+              onClick={loadSample}
+              disabled={loading}
+              className="inline-flex h-11 items-center gap-2 rounded-md border border-ink/15 bg-white px-4 text-sm font-semibold text-ink transition hover:border-cobalt/50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Sparkles size={18} />
+              Demo
             </button>
           </div>
 
@@ -137,16 +213,29 @@ export default function Home() {
                 {snapshot ? `${snapshot.label} · ${new Date(snapshot.timestamp).toLocaleString()}` : "No timeline loaded"}
               </div>
             </div>
-            <input
-              aria-label="Time slider"
-              type="range"
-              min={0}
-              max={maxIndex}
-              value={activeIndex}
-              disabled={!timeline}
-              onChange={(event) => moveTo(Number(event.target.value))}
-              className="h-2 w-full accent-rust"
-            />
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setPlaying((value) => !value)}
+                disabled={!timeline || maxIndex === 0}
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-ink/15 bg-[#fbfaf6] text-ink disabled:opacity-40"
+                title={playing ? "Pause replay" : "Play replay"}
+              >
+                {playing ? <Pause size={17} /> : <Play size={17} />}
+              </button>
+              <input
+                aria-label="Time slider"
+                type="range"
+                min={0}
+                max={maxIndex}
+                value={activeIndex}
+                disabled={!timeline}
+                onChange={(event) => {
+                  setPlaying(false);
+                  moveTo(Number(event.target.value));
+                }}
+                className="h-2 flex-1 accent-rust"
+              />
+            </div>
             <div className="mt-2 flex justify-between text-xs text-ink/50">
               <span>origin</span>
               <span>{timeline ? `${timeline.snapshots.length} snapshots` : "waiting for analysis"}</span>
@@ -154,10 +243,34 @@ export default function Home() {
             </div>
           </div>
 
-          <DependencyGraph snapshot={snapshot} highlighted={highlighted} />
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-ink/10 bg-white p-3 shadow-soft">
+            <div className="flex items-center gap-2 text-sm font-semibold text-ink/70">
+              <Layers size={16} className="text-cobalt" />
+              Hotspot Lens
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(["directory", "churn", "centrality", "complexity", "hotspot"] as const).map((option) => (
+                <button
+                  key={option}
+                  onClick={() => setLens(option)}
+                  className={`rounded-md border px-3 py-1.5 text-xs font-semibold capitalize ${
+                    lens === option ? "border-rust bg-rust/10 text-rust" : "border-ink/10 bg-[#fbfaf6] text-ink/65"
+                  }`}
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <DependencyGraph snapshot={snapshot} highlighted={highlighted} lens={lens} />
+          {selectedEvent && beforeSnapshot ? (
+            <TimePortal before={beforeSnapshot} after={snapshot} event={selectedEvent} />
+          ) : null}
         </div>
 
         <aside className="flex flex-col gap-5">
+          <WeatherPanel health={health} onExport={exportReport} canExport={Boolean(repoId)} />
           <MetricsPanel snapshot={snapshot} />
           <div className="rounded-md border border-ink/10 bg-white p-4 shadow-soft">
             <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Evolution Signal</h2>
@@ -176,10 +289,7 @@ export default function Home() {
           <EventsPanel
             events={events}
             selected={selectedEvent}
-            onSelect={(event) => {
-              setSelectedEvent(event);
-              moveTo(event.index);
-            }}
+            onSelect={selectEvent}
           />
           <SummaryPanel health={health} />
         </aside>
@@ -245,6 +355,15 @@ function EventsPanel({
                 </span>
               </div>
               <span className="text-ink/70">{event.explanation}</span>
+              {event.causal_commits.length > 0 ? (
+                <div className="mt-2 border-t border-ink/10 pt-2 text-xs text-ink/55">
+                  {event.causal_commits.slice(0, 2).map((commit) => (
+                    <div key={commit.sha}>
+                      {commit.sha} · {commit.message}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </button>
           ))
         )}
@@ -261,9 +380,128 @@ function SummaryPanel({ health }: { health: Health | null }) {
         <span className="text-2xl font-semibold text-moss">{health?.evolution_score ?? "--"}</span>
       </div>
       <p className="mt-3 text-sm leading-6 text-ink/70">
-        {health?.summary ??
+        {health?.biography || health?.summary ||
           "Load a repository to watch its architectural shape emerge across Git history."}
       </p>
+    </div>
+  );
+}
+
+function WeatherPanel({
+  health,
+  onExport,
+  canExport
+}: {
+  health: Health | null;
+  onExport: () => void;
+  canExport: boolean;
+}) {
+  const forecast = health?.forecast;
+  return (
+    <div className="rounded-md border border-ink/10 bg-white p-4 shadow-soft">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Architectural Weather</h2>
+          <div className="mt-1 text-lg font-semibold text-ink">{health?.archetype ?? "No archetype yet"}</div>
+        </div>
+        <button
+          onClick={onExport}
+          disabled={!canExport}
+          className="flex h-9 w-9 items-center justify-center rounded-md border border-ink/15 bg-[#fbfaf6] text-ink disabled:opacity-40"
+          title="Export evolution report"
+        >
+          <Download size={17} />
+        </button>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+        <div className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
+          <div className="text-xs text-ink/50">Coupling</div>
+          <div className="mt-1 font-semibold capitalize">{forecast?.coupling_pressure ?? "-"}</div>
+        </div>
+        <div className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
+          <div className="text-xs text-ink/50">Churn</div>
+          <div className="mt-1 font-semibold capitalize">{forecast?.churn_pressure ?? "-"}</div>
+        </div>
+      </div>
+      <div className="mt-3 flex items-start gap-2 rounded-md bg-cobalt/10 p-3 text-sm leading-5 text-ink/75">
+        <Flame size={16} className="mt-0.5 shrink-0 text-rust" />
+        <span>{forecast?.recommendation ?? "Analyze a repository to generate the forecast."}</span>
+      </div>
+      {forecast?.likely_bottlenecks.length ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {forecast.likely_bottlenecks.slice(0, 4).map((module) => (
+            <span key={module} className="rounded-md bg-amber/15 px-2 py-1 text-xs font-semibold text-ink/70">
+              {module.split("/").slice(-2).join("/")}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TimePortal({
+  before,
+  after,
+  event
+}: {
+  before: Snapshot;
+  after: Snapshot | null;
+  event: ArchitectureEvent;
+}) {
+  const rows = [
+    ["Coupling", before.metrics.coupling_score.toFixed(3), after?.metrics.coupling_score.toFixed(3) ?? "-"],
+    ["Dependencies", before.metrics.dependency_count.toString(), after?.metrics.dependency_count.toString() ?? "-"],
+    ["Complexity", before.metrics.complexity_proxy.toFixed(2), after?.metrics.complexity_proxy.toFixed(2) ?? "-"],
+    ["Modules", before.metrics.module_count.toString(), after?.metrics.module_count.toString() ?? "-"]
+  ];
+  return (
+    <div className="mt-4 rounded-md border border-amber/40 bg-white p-4 shadow-soft">
+      <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Before / After Portal</h2>
+      <p className="mt-2 text-sm leading-6 text-ink/70">{event.explanation}</p>
+      <div className="mt-4 grid gap-2 md:grid-cols-4">
+        {rows.map(([label, beforeValue, afterValue]) => (
+          <div key={label} className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
+            <div className="text-xs text-ink/50">{label}</div>
+            <div className="mt-1 text-sm font-semibold">
+              {beforeValue} → {afterValue}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <CommitList title="Causal Commits" commits={event.causal_commits} />
+        <div className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Affected Modules</div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {event.affected_modules.map((module) => (
+              <span key={module} className="rounded-md bg-amber/15 px-2 py-1 text-xs font-semibold text-ink/70">
+                {module.split("/").slice(-2).join("/")}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CommitList({ title, commits }: { title: string; commits: ArchitectureEvent["causal_commits"] }) {
+  return (
+    <div className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
+      <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">{title}</div>
+      <div className="mt-2 flex flex-col gap-2">
+        {commits.length === 0 ? (
+          <span className="text-sm text-ink/55">No direct causal commit isolated.</span>
+        ) : (
+          commits.map((commit) => (
+            <div key={commit.sha} className="text-sm">
+              <span className="font-semibold text-cobalt">{commit.sha}</span>
+              <span className="text-ink/70"> · {commit.message}</span>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }

@@ -9,10 +9,12 @@ type SimLink = d3.SimulationLinkDatum<SimNode> & { weight: number; kind: string 
 
 export function DependencyGraph({
   snapshot,
-  highlighted
+  highlighted,
+  lens = "directory"
 }: {
   snapshot: Snapshot | null;
   highlighted: string[];
+  lens?: "directory" | "churn" | "centrality" | "complexity" | "hotspot";
 }) {
   const ref = useRef<SVGSVGElement | null>(null);
   const highlightedSet = useMemo(() => new Set(highlighted), [highlighted]);
@@ -52,9 +54,12 @@ export function DependencyGraph({
     }
 
     const color = d3.scaleOrdinal<string, string>(d3.schemeTableau10);
+    const heat = d3
+      .scaleSequential(d3.interpolateYlOrRd)
+      .domain([0, d3.max(nodes, (node) => lensValue(node, lens)) || 1]);
     const radius = d3
       .scaleSqrt()
-      .domain([0, d3.max(nodes, (node) => node.complexity) || 1])
+      .domain([0, d3.max(nodes, (node) => lensValue(node, lens)) || 1])
       .range([5, 18]);
 
     const link = root
@@ -79,18 +84,21 @@ export function DependencyGraph({
 
     node
       .append("circle")
-      .attr("r", (item) => radius(item.complexity))
-      .attr("fill", (item) => color(item.directory))
+      .attr("r", (item) => radius(lensValue(item, lens)))
+      .attr("fill", (item) => (lens === "directory" ? color(item.directory) : heat(lensValue(item, lens))))
       .attr("fill-opacity", 0.86)
       .attr("stroke", "#151814")
       .attr("stroke-opacity", 0.2);
 
     node
       .append("title")
-      .text((item) => `${item.id}\ncomplexity ${item.complexity}\nchurn ${item.churn}`);
+      .text(
+        (item) =>
+          `${item.id}\ncomplexity ${item.complexity}\nchurn ${item.churn}\ncentrality ${item.centrality}\nhotspot ${item.hotspot_score}`
+      );
 
     node
-      .filter((item) => highlightedSet.has(item.id) || item.complexity > 3)
+      .filter((item) => highlightedSet.has(item.id) || lensValue(item, lens) > 3 || item.centrality > 0.35)
       .append("text")
       .attr("x", 12)
       .attr("y", 4)
@@ -110,7 +118,7 @@ export function DependencyGraph({
       )
       .force("charge", d3.forceManyBody().strength(-160))
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide<SimNode>().radius((item) => radius(item.complexity) + 8));
+      .force("collision", d3.forceCollide<SimNode>().radius((item) => radius(lensValue(item, lens)) + 8));
 
     simulation.on("tick", () => {
       link
@@ -147,11 +155,18 @@ export function DependencyGraph({
       }
       return d3.drag<SVGGElement, SimNode>().on("start", dragstarted).on("drag", dragged).on("end", dragended);
     }
-  }, [snapshot, highlightedSet]);
+  }, [snapshot, highlightedSet, lens]);
 
   return (
     <div className="h-[620px] overflow-hidden rounded-md border border-ink/10 bg-white p-3 shadow-soft">
       <svg ref={ref} className="h-full w-full" role="img" aria-label="Dependency graph visualization" />
     </div>
   );
+}
+
+function lensValue(node: SimNode, lens: "directory" | "churn" | "centrality" | "complexity" | "hotspot") {
+  if (lens === "churn") return node.churn;
+  if (lens === "centrality") return node.centrality;
+  if (lens === "hotspot") return node.hotspot_score;
+  return node.complexity;
 }

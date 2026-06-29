@@ -40,3 +40,10 @@ export function getHealth(repoId: string) {
   return request<Health>(`/health/${repoId}`);
 }
 
+export function getSampleRepo() {
+  return request<{ repo_path: string; name: string }>("/sample-repo");
+}
+
+export function getReport(repoId: string) {
+  return request<{ repo_id: string; markdown: string }>(`/report/${repoId}`);
+}

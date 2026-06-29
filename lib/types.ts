@@ -30,6 +30,8 @@ export type GraphNode = {
   churn: number;
   commits: number;
   complexity: number;
+  centrality: number;
+  hotspot_score: number;
 };
 
 export type GraphEdge = {
@@ -64,15 +66,30 @@ export type Timeline = {
 
 export type ArchitectureEvent = {
   index: number;
+  previous_index: number;
   timestamp: string;
   severity: string;
   explanation: string;
   affected_modules: string[];
+  causal_commits: CommitInfo[];
+  before_metrics: Metrics | null;
+  after_metrics: Metrics | null;
+  delta: Record<string, number>;
+};
+
+export type Forecast = {
+  coupling_pressure: string;
+  churn_pressure: string;
+  likely_bottlenecks: string[];
+  recommendation: string;
 };
 
 export type Health = {
   evolution_score: number;
   stability_trend: number[];
   summary: string;
+  archetype: string;
+  forecast: Forecast | null;
+  biography: string;
+  report_markdown: string;
 };
-
