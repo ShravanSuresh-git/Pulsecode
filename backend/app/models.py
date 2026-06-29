@@ -88,6 +88,8 @@ class ArchitectureEvent(BaseModel):
     severity: str
     explanation: str
     affected_modules: list[str]
+    title: str = ""
+    influence_score: float = 0
     causal_commits: list[CommitInfo] = []
     before_metrics: SnapshotMetrics | None = None
     after_metrics: SnapshotMetrics | None = None

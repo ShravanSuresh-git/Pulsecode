@@ -63,6 +63,8 @@ CODE_EXTENSIONS = {
     ".svelte",
 }
 
+_IMPORT_EDGE_CACHE: dict[tuple[str, tuple[str, ...]], set[tuple[str, str]]] = {}
+
 
 def analyze_repository(repo_path: Path, snapshot_size: int) -> AnalysisResult:
     repo = Repo(repo_path)
@@ -340,21 +342,23 @@ def _species(
 def _weather(snapshot: Snapshot, previous: Snapshot | None) -> ArchitecturalWeather:
     if previous is None:
         if snapshot.quality_score >= 70:
-            return ArchitecturalWeather(condition="Sunny", severity=1, explanation="The starting architecture is stable and readable.")
-        return ArchitecturalWeather(condition="Cloudy", severity=2, explanation="The starting architecture already shows structural pressure.")
+            return ArchitecturalWeather(condition="Stable", severity=1, explanation="The starting architecture is readable, with no early structural pressure spike.")
+        return ArchitecturalWeather(condition="Growing", severity=2, explanation="The starting architecture already shows measurable coupling or complexity pressure.")
 
     coupling_delta = snapshot.metrics.coupling_score - previous.metrics.coupling_score
     edge_delta = snapshot.metrics.dependency_count - previous.metrics.dependency_count
     quality_delta = snapshot.quality_score - previous.quality_score
     if coupling_delta > 0.18 or edge_delta > max(12, previous.metrics.dependency_count * 0.6):
-        return ArchitecturalWeather(condition="Hurricane", severity=5, explanation="Dependency growth is explosive in this interval.")
+        return ArchitecturalWeather(condition="High Risk", severity=5, explanation="Dependency growth is explosive in this interval and may create long-lived coupling.")
     if coupling_delta > 0.08 or quality_delta < -18:
-        return ArchitecturalWeather(condition="Storm", severity=4, explanation="Coupling rose quickly and architecture quality dropped.")
+        return ArchitecturalWeather(condition="Accelerating", severity=4, explanation="Coupling rose quickly while architecture quality dropped.")
     if coupling_delta > 0.03 or edge_delta > 4:
-        return ArchitecturalWeather(condition="Cloudy", severity=3, explanation="Dependency pressure is increasing.")
+        return ArchitecturalWeather(condition="Growing", severity=3, explanation="Dependency pressure is increasing but has not crossed the high-risk range.")
     if quality_delta > 10 or coupling_delta < -0.04:
-        return ArchitecturalWeather(condition="Clearing", severity=1, explanation="Coupling pressure is easing.")
-    return ArchitecturalWeather(condition="Sunny", severity=1, explanation="Architecture is evolving without a sharp pressure change.")
+        return ArchitecturalWeather(condition="Consolidating", severity=1, explanation="Coupling pressure is easing and quality is improving.")
+    if (snapshot.dna.layer_separation if snapshot.dna else 0) > 0.62:
+        return ArchitecturalWeather(condition="Fragmenting", severity=3, explanation="Cross-directory dependencies dominate this snapshot, suggesting responsibility spread.")
+    return ArchitecturalWeather(condition="Stable", severity=1, explanation="Architecture is evolving without a sharp pressure change.")
 
 
 def _detect_events(snapshots: list[Snapshot]) -> list[ArchitectureEvent]:
@@ -377,6 +381,14 @@ def _detect_events(snapshots: list[Snapshot]) -> list[ArchitectureEvent]:
         if reasons:
             affected = _top_affected_modules(current)
             severity = "high" if len(reasons) >= 2 else "medium"
+            delta = {
+                "coupling_score": round(density_delta, 4),
+                "dependency_count": float(edge_delta),
+                "churn_score": float(current.metrics.churn_score - previous.metrics.churn_score),
+                "complexity_proxy": round(current.metrics.complexity_proxy - previous.metrics.complexity_proxy, 2),
+            }
+            title = _event_title(previous, current, affected, delta)
+            influence_score = _event_influence_score(delta, affected)
             events.append(
                 ArchitectureEvent(
                     index=current.index,
@@ -385,15 +397,12 @@ def _detect_events(snapshots: list[Snapshot]) -> list[ArchitectureEvent]:
                     severity=severity,
                     explanation=f"Between {previous.label} and {current.label}, " + "; ".join(reasons) + ".",
                     affected_modules=affected,
+                    title=title,
+                    influence_score=influence_score,
                     causal_commits=_causal_commits(current.commits, affected),
                     before_metrics=previous.metrics,
                     after_metrics=current.metrics,
-                    delta={
-                        "coupling_score": round(density_delta, 4),
-                        "dependency_count": float(edge_delta),
-                        "churn_score": float(current.metrics.churn_score - previous.metrics.churn_score),
-                        "complexity_proxy": round(current.metrics.complexity_proxy - previous.metrics.complexity_proxy, 2),
-                    },
+                    delta=delta,
                     shockwave=_shockwave(current, affected),
                 )
             )
@@ -521,6 +530,38 @@ def _causal_commits(commits: list[CommitInfo], affected: list[str]) -> list[Comm
         reverse=True,
     )
     return [commit for commit in ranked if affected_set.intersection(commit.files_changed)][:5]
+
+
+def _event_title(previous: Snapshot, current: Snapshot, affected: list[str], delta: dict[str, float]) -> str:
+    lead = Path(affected[0]).stem.replace("_", " ").replace("-", " ").title() if affected else "Architecture"
+    coupling_delta = delta.get("coupling_score", 0)
+    dependency_delta = delta.get("dependency_count", 0)
+    complexity_delta = delta.get("complexity_proxy", 0)
+    module_delta = current.metrics.module_count - previous.metrics.module_count
+    hub = next((module for module in affected if (current.dna and current.dna.centralization_score > 0.45)), None)
+    if hub and coupling_delta > 0.05:
+        return f"{Path(hub).stem.replace('_', ' ').title()} becomes dependency hub"
+    if module_delta >= 3 and coupling_delta <= 0.04:
+        return "Architecture modularization"
+    if dependency_delta >= 8:
+        return f"{lead} dependency expansion"
+    if any(token in lead.lower() for token in ["util", "shared", "core", "common"]):
+        return "Large-scale utility extraction"
+    if complexity_delta > 1:
+        return f"{lead} complexity surge"
+    if coupling_delta < -0.03:
+        return f"{lead} coupling reduction"
+    return f"{lead} architectural shift"
+
+
+def _event_influence_score(delta: dict[str, float], affected: list[str]) -> float:
+    score = (
+        abs(delta.get("coupling_score", 0)) * 140
+        + abs(delta.get("dependency_count", 0)) * 2.4
+        + abs(delta.get("complexity_proxy", 0)) * 9
+        + min(12, len(affected) * 1.8)
+    )
+    return round(max(1, min(100, score)), 1)
 
 
 def _attach_event_causes(events: list[ArchitectureEvent], snapshots: list[Snapshot]) -> None:
@@ -1169,18 +1210,26 @@ def _biography(
 ) -> str:
     first = snapshots[0].metrics
     last = snapshots[-1].metrics
-    central = forecast.likely_bottlenecks[:3]
-    event_sentence = (
-        f"It experienced {len(events)} notable structural shift{'s' if len(events) != 1 else ''}, "
-        f"with the largest change around t={events[-1].index}."
+    midpoint = snapshots[len(snapshots) // 2].metrics
+    central = forecast.likely_bottlenecks[:2]
+    opening = "a tightly coupled application" if first.coupling_score > 0.45 else "a compact modular application"
+    if last.coupling_score - first.coupling_score > 0.08:
+        density_story = "Dependency density increased steadily before stabilizing around the latest snapshot."
+    elif last.coupling_score < midpoint.coupling_score:
+        density_story = "Dependency pressure rose during the middle of the lifecycle, then eased after later consolidation."
+    else:
+        density_story = "Dependency density stayed comparatively steady across the observed lifecycle."
+    event_story = (
+        f"{events[0].title} became the first major architectural turning point."
         if events
-        else "No abrupt structural break dominated the history."
+        else "No single architectural event permanently dominated the timeline."
     )
-    central_text = ", ".join(central) if central else "no clear bottleneck"
+    central_text = ", ".join(central) if central else "no dominant subsystem"
     return (
-        f"This codebase follows a {archetype.lower()} arc. It began with {first.module_count} modules "
-        f"and now has {last.module_count}, while dependency density moved from {first.coupling_score:.3f} "
-        f"to {last.coupling_score:.3f}. {event_sentence} Current architectural gravity centers on {central_text}."
+        f"The repository began as {opening}. {event_story} "
+        f"Module count moved from {first.module_count} to {last.module_count}, while complexity moved from "
+        f"{first.complexity_proxy:.2f} to {last.complexity_proxy:.2f}. {density_story} "
+        f"Today, architectural gravity centers on {central_text}, and the current shape most closely resembles {archetype.lower()}."
     )
 
 
@@ -1216,7 +1265,7 @@ def _evolution_story(
         story.append(f"{len(events)} architectural shockwave{'s' if len(events) != 1 else ''} changed the graph shape.")
     story.append(
         f"By the latest snapshot, the system is {last.species.name if last.species else 'unclassified'} "
-        f"with {last.weather.condition if last.weather else 'unknown'} architectural weather."
+        f"with {last.weather.condition if last.weather else 'unknown'} evolution outlook."
     )
     return story
 
@@ -1306,11 +1355,11 @@ def _detect_fossils(snapshots: list[Snapshot], events: list[ArchitectureEvent]) 
     for event in events:
         fossils.append(
             ArchitecturalFossil(
-                title=f"Architectural Shockwave at t={event.index}",
+                title=event.title or f"Architectural Shockwave at t={event.index}",
                 snapshot_index=event.index,
                 timestamp=event.timestamp,
                 reason=event.explanation,
-                impact_score=round(abs(event.delta.get("dependency_count", 0)) + abs(event.delta.get("coupling_score", 0)) * 100, 1),
+                impact_score=event.influence_score or round(abs(event.delta.get("dependency_count", 0)) + abs(event.delta.get("coupling_score", 0)) * 100, 1),
                 commit=event.causal_commits[0] if event.causal_commits else None,
                 affected_modules=event.affected_modules,
             )
@@ -1361,7 +1410,7 @@ def _report_markdown(
         f"**Archetype:** {archetype}",
         f"**Snapshots:** {len(snapshots)}",
         f"**Latest species:** {latest.species.name if latest and latest.species else 'Unknown'}",
-        f"**Latest weather:** {latest.weather.condition if latest and latest.weather else 'Unknown'}",
+        f"**Evolution outlook:** {latest.weather.condition if latest and latest.weather else 'Unknown'}",
         "",
         "## Summary",
         "",
@@ -1393,7 +1442,7 @@ def _report_markdown(
         "",
         *(_dna_lines(latest) if latest else ["No DNA available."]),
         "",
-        "## Architectural Weather",
+        "## Evolution Outlook",
         "",
         f"- Coupling pressure: {forecast.coupling_pressure}",
         f"- Churn pressure: {forecast.churn_pressure}",
@@ -1427,11 +1476,21 @@ def _report_markdown(
         f"- Future dependency concentration: {forecast.future_dependency_concentration}",
         f"- Future hotspot modules: {', '.join(forecast.future_hotspot_modules) or 'none'}",
         "",
-        "## Suggested Refactors",
+        "## Coupling Growth",
+        "",
+        f"- Coupling moved from {snapshots[0].metrics.coupling_score if snapshots else 0} to {latest.metrics.coupling_score if latest else 0}.",
+        f"- Dependency count moved from {snapshots[0].metrics.dependency_count if snapshots else 0} to {latest.metrics.dependency_count if latest else 0}.",
+        "",
+        "## Complexity Trends",
+        "",
+        f"- Complexity proxy moved from {snapshots[0].metrics.complexity_proxy if snapshots else 0} to {latest.metrics.complexity_proxy if latest else 0}.",
+        f"- Hotspot modules: {', '.join(forecast.future_hotspot_modules[:5]) or 'none'}",
+        "",
+        "## Recommendations",
         "",
         *(_suggested_refactors(forecast, memories, turning_points)),
         "",
-        "## Shift Events",
+        "## Major Architectural Events",
         "",
     ]
     if not events:
@@ -1440,9 +1499,11 @@ def _report_markdown(
         commits = ", ".join(f"{commit.sha} {commit.message}" for commit in event.causal_commits) or "No direct causal commit isolated"
         lines.extend(
             [
-                f"### t={event.index} ({event.severity})",
+                f"### {event.title or f't={event.index}'} ({event.severity})",
                 "",
                 event.explanation,
+                "",
+                f"**Influence score:** {event.influence_score:.1f}",
                 "",
                 f"**Likely causes:** {', '.join(cause.cause for cause in event.causes) or 'Unknown'}",
                 "",
@@ -1479,7 +1540,7 @@ def _report_html(
         for fossil in fossils
     )
     event_rows = "".join(
-        f"<tr><td>t={event.index}</td><td>{event.severity}</td><td>{event.explanation}<br><strong>Causes:</strong> {', '.join(cause.cause for cause in event.causes)}</td></tr>"
+        f"<tr><td>{event.title or f't={event.index}'}</td><td>{event.influence_score:.1f}</td><td>{event.explanation}<br><strong>Causes:</strong> {', '.join(cause.cause for cause in event.causes)}</td></tr>"
         for event in events
     )
     memory_rows = "".join(
@@ -1530,7 +1591,7 @@ def _report_html(
     <h1>PulseCode Evolution Report</h1>
     <span class="pill">{archetype}</span>
     <span class="pill">{latest.species.name if latest and latest.species else 'Unknown species'}</span>
-    <span class="pill">{latest.weather.condition if latest and latest.weather else 'Unknown weather'}</span>
+    <span class="pill">{latest.weather.condition if latest and latest.weather else 'Unknown outlook'}</span>
   </section>
   <h2>Repository Overview</h2>
   <p>{summary}</p>
@@ -1554,18 +1615,18 @@ def _report_html(
   <table><tr><th>Chain</th><th>Type</th><th>Evidence</th></tr>{influence_rows}</table>
   <h2>Decision Influence Chains</h2>
   <table><tr><th>Chain</th><th>Type</th><th>Evidence</th></tr>{decision_influence_rows}</table>
-  <h2>Architectural Events</h2>
-  <table><tr><th>Snapshot</th><th>Severity</th><th>Explanation</th></tr>{event_rows}</table>
-  <h2>Dependency Growth</h2>
+  <h2>Major Architectural Events</h2>
+  <table><tr><th>Event</th><th>Influence</th><th>Explanation</th></tr>{event_rows}</table>
+  <h2>Coupling Growth</h2>
   <p>Latest dependency count: {latest.metrics.dependency_count if latest else 0}</p>
-  <h2>Complexity Growth</h2>
+  <h2>Complexity Trends</h2>
   <p>Latest complexity proxy: {latest.metrics.complexity_proxy if latest else 0}</p>
-  <h2>Architectural Weather</h2>
+  <h2>Evolution Outlook</h2>
   <p>{forecast.recommendation}</p>
   <h2>Future Risks</h2>
   <p>Likely bottlenecks: {', '.join(forecast.likely_bottlenecks) or 'none'}</p>
   <p>Future coupling: {forecast.future_coupling}; future density: {forecast.future_graph_density}; future dependency concentration: {forecast.future_dependency_concentration}.</p>
-  <h2>Suggested Refactors</h2>
+  <h2>Recommendations</h2>
   <ul>{"".join(f"<li>{item}</li>" for item in _suggested_refactors(forecast, memories, turning_points))}</ul>
 </body>
 </html>"""
@@ -1744,6 +1805,9 @@ def _is_sourceish(path: str) -> bool:
 
 
 def _import_edges(repo_path: Path, files: set[str]) -> set[tuple[str, str]]:
+    cache_key = (str(repo_path), tuple(sorted(files)))
+    if cache_key in _IMPORT_EDGE_CACHE:
+        return _IMPORT_EDGE_CACHE[cache_key]
     edges: set[tuple[str, str]] = set()
     module_map = {_module_name(file): file for file in files}
     basename_map: dict[str, list[str]] = defaultdict(list)
@@ -1760,6 +1824,7 @@ def _import_edges(repo_path: Path, files: set[str]) -> set[tuple[str, str]]:
             target = _resolve_import(imported, file, module_map, basename_map)
             if target and target != file:
                 edges.add(tuple(sorted((file, target))))
+    _IMPORT_EDGE_CACHE[cache_key] = edges
     return edges
 
 

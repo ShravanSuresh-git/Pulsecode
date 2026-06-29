@@ -10,14 +10,23 @@ type SimLink = d3.SimulationLinkDatum<SimNode> & { weight: number; kind: string 
 export function DependencyGraph({
   snapshot,
   highlighted,
-  lens = "directory"
+  lens = "directory",
+  addedNodes = [],
+  removedNodes = [],
+  compact = false
 }: {
   snapshot: Snapshot | null;
   highlighted: string[];
+  addedNodes?: string[];
+  removedNodes?: string[];
   lens?: "directory" | "churn" | "centrality" | "complexity" | "hotspot";
+  compact?: boolean;
 }) {
   const ref = useRef<SVGSVGElement | null>(null);
+  const positionRef = useRef(new Map<string, { x: number; y: number }>());
   const highlightedSet = useMemo(() => new Set(highlighted), [highlighted]);
+  const addedSet = useMemo(() => new Set(addedNodes), [addedNodes]);
+  const removedSet = useMemo(() => new Set(removedNodes), [removedNodes]);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -25,12 +34,15 @@ export function DependencyGraph({
     svg.selectAll("*").remove();
 
     const width = ref.current.clientWidth || 900;
-    const height = ref.current.clientHeight || 620;
-    const nodes: SimNode[] = (snapshot?.nodes ?? []).slice(0, 120).map((node) => ({ ...node }));
+    const height = ref.current.clientHeight || (compact ? 320 : 620);
+    const nodes: SimNode[] = (snapshot?.nodes ?? []).slice(0, compact ? 70 : 120).map((node) => {
+      const cached = positionRef.current.get(node.id);
+      return cached ? { ...node, x: cached.x, y: cached.y } : { ...node };
+    });
     const nodeIds = new Set(nodes.map((node) => node.id));
     const links: SimLink[] = (snapshot?.edges ?? [])
       .filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target))
-      .slice(0, 240)
+      .slice(0, compact ? 120 : 240)
       .map((edge) => ({ ...edge }));
 
     const root = svg.attr("viewBox", `0 0 ${width} ${height}`);
@@ -72,10 +84,11 @@ export function DependencyGraph({
           ? "graph-link highlighted"
           : "graph-link"
       )
+      .attr("stroke-dasharray", (edge) => (edge.kind === "co-change" ? "4 5" : "0"))
       .attr("stroke-width", (edge) => Math.max(1, Math.min(5, edge.weight)))
       .attr("opacity", 0)
       .transition()
-      .duration(520)
+      .duration(compact ? 360 : 520)
       .attr("opacity", 1)
       .selection();
 
@@ -84,18 +97,25 @@ export function DependencyGraph({
       .selectAll<SVGGElement, SimNode>("g")
       .data(nodes, (item) => item.id)
       .join("g")
-      .attr("class", (item) => (highlightedSet.has(item.id) ? "graph-node highlighted" : "graph-node"))
+      .attr("class", (item) =>
+        [
+          "graph-node",
+          highlightedSet.has(item.id) ? "highlighted" : "",
+          addedSet.has(item.id) ? "added" : "",
+          removedSet.has(item.id) ? "removed" : ""
+        ].filter(Boolean).join(" ")
+      )
       .call(drag());
 
     node
       .append("circle")
       .attr("r", 0)
       .attr("fill", (item) => (lens === "directory" ? color(item.directory) : heat(lensValue(item, lens))))
-      .attr("fill-opacity", 0.86)
+      .attr("fill-opacity", (item) => (removedSet.has(item.id) ? 0.38 : 0.86))
       .attr("stroke", "#151814")
       .attr("stroke-opacity", 0.2)
       .transition()
-      .duration(620)
+      .duration(compact ? 420 : 620)
       .attr("r", (item) => radius(lensValue(item, lens)));
 
     node
@@ -119,9 +139,9 @@ export function DependencyGraph({
       .append("text")
       .attr("x", 12)
       .attr("y", 4)
-      .attr("font-size", 11)
+      .attr("font-size", compact ? 9 : 11)
       .attr("fill", "#151814")
-      .text((item) => item.label.slice(0, 22));
+      .text((item) => item.label.slice(0, compact ? 14 : 22));
 
     const simulation = d3
       .forceSimulation(nodes)
@@ -147,6 +167,7 @@ export function DependencyGraph({
       node.attr("transform", (item) => {
         item.x = Math.max(24, Math.min(width - 24, item.x ?? width / 2));
         item.y = Math.max(24, Math.min(height - 24, item.y ?? height / 2));
+        positionRef.current.set(item.id, { x: item.x, y: item.y });
         return `translate(${item.x},${item.y})`;
       });
     });
@@ -172,10 +193,10 @@ export function DependencyGraph({
       }
       return d3.drag<SVGGElement, SimNode>().on("start", dragstarted).on("drag", dragged).on("end", dragended);
     }
-  }, [snapshot, highlightedSet, lens]);
+  }, [addedSet, compact, highlightedSet, lens, removedSet, snapshot]);
 
   return (
-    <div className="h-[620px] overflow-hidden rounded-md border border-ink/10 bg-white p-3 shadow-soft">
+    <div className={`${compact ? "h-80" : "h-[620px]"} overflow-hidden rounded-md border border-ink/10 bg-white p-3 shadow-soft`}>
       <svg ref={ref} className="h-full w-full" role="img" aria-label="Dependency graph visualization" />
     </div>
   );

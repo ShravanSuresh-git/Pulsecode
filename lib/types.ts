@@ -106,6 +106,8 @@ export type ArchitectureEvent = {
   severity: string;
   explanation: string;
   affected_modules: string[];
+  title: string;
+  influence_score: number;
   causal_commits: CommitInfo[];
   before_metrics: Metrics | null;
   after_metrics: Metrics | null;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, CloudSun, Download, Flame, GitBranch, Layers, Pause, Play, RotateCcw, Search, Sparkles } from "lucide-react";
 import {
   Area,
@@ -16,9 +16,24 @@ import {
 } from "recharts";
 import { DependencyGraph } from "../components/DependencyGraph";
 import { analyzeRepo, getEvents, getHealth, getReport, getReportUrl, getSampleRepo, getSnapshot, getTimeline } from "../lib/api";
-import type { ArchitecturalDecision, ArchitectureEvent, Health, Snapshot, Timeline } from "../lib/types";
+import type { ArchitectureDNA, ArchitecturalDecision, ArchitectureEvent, Health, Snapshot, Timeline } from "../lib/types";
 
 const samplePath = "/Users/shravan/Documents/Pulsecode";
+const replaySpeeds = [
+  { label: "0.5x", value: 0.5 },
+  { label: "1x", value: 1 },
+  { label: "2x", value: 2 },
+  { label: "4x", value: 4 }
+] as const;
+const dnaKeys: Array<{ key: keyof ArchitectureDNA; label: string }> = [
+  { key: "modularity", label: "Modularity" },
+  { key: "coupling", label: "Coupling" },
+  { key: "centralization_score", label: "Centralization" },
+  { key: "layer_separation", label: "Layer Separation" },
+  { key: "dependency_concentration", label: "Dependency Concentration" },
+  { key: "cyclic_dependency_score", label: "Cycle Pressure" },
+  { key: "hotspot_concentration", label: "Hotspot Concentration" }
+];
 
 export default function Home() {
   const [repoPath, setRepoPath] = useState(samplePath);
@@ -35,11 +50,12 @@ export default function Home() {
   const [lens, setLens] = useState<"directory" | "churn" | "centrality" | "complexity" | "hotspot">("directory");
   const [playing, setPlaying] = useState(false);
   const [loopPlayback, setLoopPlayback] = useState(true);
-  const [playbackSpeed, setPlaybackSpeed] = useState(1400);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [compareIndex, setCompareIndex] = useState(0);
   const [shockwavePhase, setShockwavePhase] = useState(3);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const snapshotCache = useRef(new Map<number, Snapshot>());
 
   async function runAnalysis() {
     setLoading(true);
@@ -47,6 +63,7 @@ export default function Home() {
     setSelectedEvent(null);
     setSelectedDecision(null);
     setBeforeSnapshot(null);
+    snapshotCache.current.clear();
     try {
       const analysis = await analyzeRepo(repoPath, snapshotSize);
       const [nextTimeline, nextEvents, nextHealth] = await Promise.all([
@@ -60,6 +77,7 @@ export default function Home() {
       setEvents(nextEvents.events);
       setHealth(nextHealth);
       setSnapshot(firstSnapshot);
+      if (firstSnapshot) snapshotCache.current.set(0, firstSnapshot);
       setActiveIndex(0);
       setCompareIndex(Math.max(0, analysis.snapshot_count - 1));
     } catch (err) {
@@ -72,13 +90,20 @@ export default function Home() {
   const moveTo = useCallback(async (index: number) => {
     if (!repoId) return;
     setActiveIndex(index);
+    const cached = snapshotCache.current.get(index);
+    if (cached) {
+      setSnapshot(cached);
+      return;
+    }
     const nextSnapshot = await getSnapshot(repoId, index);
+    snapshotCache.current.set(index, nextSnapshot);
     setSnapshot(nextSnapshot);
   }, [repoId]);
 
   async function loadSample() {
     setLoading(true);
     setError(null);
+    snapshotCache.current.clear();
     try {
       const sample = await getSampleRepo();
       setRepoPath(sample.repo_path);
@@ -95,6 +120,7 @@ export default function Home() {
       setEvents(nextEvents.events);
       setHealth(nextHealth);
       setSnapshot(firstSnapshot);
+      if (firstSnapshot) snapshotCache.current.set(0, firstSnapshot);
       setActiveIndex(0);
       setCompareIndex(Math.max(0, analysis.snapshot_count - 1));
       setSelectedEvent(null);
@@ -113,9 +139,11 @@ export default function Home() {
     setShockwavePhase(0);
     if (repoId) {
       const [before, after] = await Promise.all([
-        getSnapshot(repoId, event.previous_index),
-        getSnapshot(repoId, event.index)
+        snapshotCache.current.get(event.previous_index) ?? getSnapshot(repoId, event.previous_index),
+        snapshotCache.current.get(event.index) ?? getSnapshot(repoId, event.index)
       ]);
+      snapshotCache.current.set(event.previous_index, before);
+      snapshotCache.current.set(event.index, after);
       setBeforeSnapshot(before);
       setSnapshot(after);
       setActiveIndex(event.index);
@@ -129,9 +157,11 @@ export default function Home() {
     setSelectedEvent(matchingEvent);
     if (repoId) {
       const [before, after] = await Promise.all([
-        getSnapshot(repoId, Math.max(0, decision.start_snapshot)),
-        getSnapshot(repoId, decision.end_snapshot)
+        snapshotCache.current.get(Math.max(0, decision.start_snapshot)) ?? getSnapshot(repoId, Math.max(0, decision.start_snapshot)),
+        snapshotCache.current.get(decision.end_snapshot) ?? getSnapshot(repoId, decision.end_snapshot)
       ]);
+      snapshotCache.current.set(Math.max(0, decision.start_snapshot), before);
+      snapshotCache.current.set(decision.end_snapshot, after);
       setBeforeSnapshot(before);
       setSnapshot(after);
       setActiveIndex(decision.end_snapshot);
@@ -170,9 +200,30 @@ export default function Home() {
         return;
       }
       moveTo(next);
-    }, playbackSpeed);
+    }, 1600 / playbackSpeed);
     return () => window.clearInterval(timer);
   }, [activeIndex, loopPlayback, maxIndex, moveTo, playbackSpeed, playing, timeline]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT") return;
+      if (event.code === "Space") {
+        event.preventDefault();
+        if (timeline && maxIndex > 0) setPlaying((value) => !value);
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        moveTo(Math.min(maxIndex, activeIndex + 1));
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        moveTo(Math.max(0, activeIndex - 1));
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeIndex, maxIndex, moveTo, timeline]);
 
   useEffect(() => {
     if (!selectedEvent && !selectedDecision) return;
@@ -198,10 +249,10 @@ export default function Home() {
   const compareSnapshot = timeline?.snapshots[compareIndex] ?? null;
   const dnaData = useMemo(() => {
     if (!snapshot?.dna || !compareSnapshot?.dna) return [];
-    return Object.entries(snapshot.dna).map(([key, value]) => ({
-      axis: key.replaceAll("_", " "),
-      current: Number(value),
-      compare: Number(compareSnapshot.dna?.[key as keyof typeof compareSnapshot.dna] ?? 0)
+    return dnaKeys.map(({ key, label }) => ({
+      axis: label,
+      current: Number(snapshot.dna?.[key] ?? 0),
+      compare: Number(compareSnapshot.dna?.[key] ?? 0)
     }));
   }, [compareSnapshot, snapshot]);
 
@@ -316,25 +367,41 @@ export default function Home() {
                 {snapshot?.species?.name ?? "Unclassified"}
               </span>
               <span className="rounded-md bg-amber/15 px-2 py-1 text-xs font-semibold text-ink/70">
-                {snapshot?.weather?.condition ?? "No weather"} · score {snapshot?.quality_score ?? "--"}
+                {snapshot?.weather?.condition ?? "No outlook"} · score {snapshot?.quality_score ?? "--"}
               </span>
-              <label className="ml-auto flex items-center gap-2 text-xs text-ink/55">
-                Speed
-                <select
-                  value={playbackSpeed}
-                  onChange={(event) => setPlaybackSpeed(Number(event.target.value))}
-                  className="rounded-md border border-ink/15 bg-white px-2 py-1"
-                >
-                  <option value={2200}>Slow</option>
-                  <option value={1400}>Normal</option>
-                  <option value={800}>Fast</option>
-                </select>
-              </label>
+              <div className="ml-auto flex items-center gap-1 rounded-md border border-ink/10 bg-[#fbfaf6] p-1">
+                {replaySpeeds.map((speed) => (
+                  <button
+                    key={speed.label}
+                    onClick={() => setPlaybackSpeed(speed.value)}
+                    className={`rounded px-2 py-1 text-xs font-semibold transition ${
+                      playbackSpeed === speed.value ? "bg-ink text-white" : "text-ink/55 hover:bg-white"
+                    }`}
+                    title={`Replay at ${speed.label}`}
+                  >
+                    {speed.label}
+                  </button>
+                ))}
+              </div>
               <label className="flex items-center gap-2 text-xs text-ink/55">
                 <input type="checkbox" checked={loopPlayback} onChange={(event) => setLoopPlayback(event.target.checked)} />
                 Loop
               </label>
             </div>
+            {events.length ? (
+              <div className="mt-3 flex flex-wrap gap-2 border-t border-ink/10 pt-3">
+                {events.slice(0, 8).map((event) => (
+                  <button
+                    key={`jump-${event.index}`}
+                    onClick={() => selectEvent(event)}
+                    className="rounded-md border border-ink/10 bg-[#fbfaf6] px-2 py-1 text-xs font-semibold text-ink/60 transition hover:border-rust hover:text-rust"
+                    title={`Jump to ${event.title}`}
+                  >
+                    t={event.index} · {event.title || "Event"}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
 
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-ink/10 bg-white p-3 shadow-soft">
@@ -357,6 +424,7 @@ export default function Home() {
             </div>
           </div>
 
+          {loading ? <LoadingSkeleton /> : null}
           <DependencyGraph snapshot={snapshot} highlighted={highlighted} lens={lens} />
           <DecisionReplay
             decisions={health?.decisions ?? []}
@@ -404,6 +472,20 @@ export default function Home() {
         </aside>
       </section>
     </main>
+  );
+}
+
+function LoadingSkeleton() {
+  return (
+    <div className="mb-4 grid gap-3 md:grid-cols-3">
+      {[0, 1, 2].map((item) => (
+        <div key={item} className="rounded-md border border-ink/10 bg-white p-4 shadow-soft">
+          <div className="skeleton h-4 w-32 rounded" />
+          <div className="skeleton mt-4 h-8 w-24 rounded" />
+          <div className="skeleton mt-3 h-3 w-full rounded" />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -555,14 +637,35 @@ function DnaPanel({
           </ResponsiveContainer>
         </div>
         <div className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3 text-sm">
-          <div className="font-semibold text-ink">{snapshot?.species?.name ?? "Unclassified"}</div>
-          <div className="mt-1 text-xs text-ink/50">
-            Confidence {snapshot?.species ? Math.round(snapshot.species.confidence * 100) : 0}%
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="font-semibold text-ink">{snapshot?.species?.name ?? "Unclassified"}</div>
+              <div className="mt-1 text-xs text-ink/50">
+                DNA confidence {snapshot?.species ? Math.round(snapshot.species.confidence * 100) : 0}%
+              </div>
+            </div>
+            <span className="rounded-md bg-moss/10 px-2 py-1 text-xs font-semibold text-moss">
+              t={snapshot?.index ?? "-"}
+            </span>
           </div>
-          <div className="mt-3 flex flex-col gap-2 text-ink/65">
-            {(snapshot?.species?.reasons ?? ["Analyze a repository to classify its software species."]).slice(0, 3).map((reason) => (
-              <span key={reason}>{reason}</span>
+          <div className="mt-4 flex flex-col gap-2">
+            {data.map((item) => (
+              <div key={item.axis}>
+                <div className="mb-1 flex justify-between text-xs text-ink/55">
+                  <span>{item.axis}</span>
+                  <span>{item.current.toFixed(2)} / Δ {(item.current - item.compare).toFixed(2)}</span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-ink/10">
+                  <div
+                    className="h-full rounded-full bg-cobalt transition-all duration-500"
+                    style={{ width: `${Math.max(4, Math.min(100, item.current * 100))}%` }}
+                  />
+                </div>
+              </div>
             ))}
+          </div>
+          <div className="mt-4 rounded-md bg-white p-3 text-xs leading-5 text-ink/60">
+            {(snapshot?.species?.reasons ?? ["Analyze a repository to classify its software species."])[0]}
           </div>
         </div>
       </div>
@@ -597,12 +700,23 @@ function EventsPanel({
               }`}
             >
               <div className="mb-1 flex items-center justify-between">
-                <span className="font-semibold">t={event.index}</span>
+                <span className="font-semibold">{event.title || `t=${event.index}`}</span>
                 <span className="rounded bg-rust/10 px-2 py-0.5 text-xs font-semibold text-rust">
-                  {event.severity}
+                  {event.influence_score.toFixed(1)}
                 </span>
               </div>
               <span className="text-ink/70">{event.explanation}</span>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                <MiniMetric label="Coupling" value={`${event.before_metrics?.coupling_score.toFixed(2) ?? "-"} → ${event.after_metrics?.coupling_score.toFixed(2) ?? "-"}`} />
+                <MiniMetric label="Dependencies" value={`${event.before_metrics?.dependency_count ?? "-"} → ${event.after_metrics?.dependency_count ?? "-"}`} />
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {event.affected_modules.slice(0, 3).map((module) => (
+                  <span key={module} className="rounded bg-white px-2 py-0.5 text-[11px] font-semibold text-ink/55">
+                    {module.split("/").slice(-2).join("/")}
+                  </span>
+                ))}
+              </div>
               {event.causes.length > 0 ? (
                 <div className="mt-2 rounded-md bg-cobalt/10 p-2 text-xs text-ink/70">
                   Why: {event.causes[0].cause} ({Math.round(event.causes[0].confidence * 100)}%)
@@ -656,7 +770,7 @@ function WeatherPanel({
     <div className="rounded-md border border-ink/10 bg-white p-4 shadow-soft">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Architectural Weather</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Evolution Outlook</h2>
           <div className="mt-1 text-lg font-semibold text-ink">{health?.archetype ?? "No archetype yet"}</div>
         </div>
         <div className="flex gap-1">
@@ -675,8 +789,8 @@ function WeatherPanel({
       </div>
       <div className="mt-3 flex items-center gap-2 rounded-md bg-[#fbfaf6] p-3 text-sm">
         <CloudSun size={17} className="text-amber" />
-        <span className="font-semibold">{snapshot?.weather?.condition ?? "No weather"}</span>
-        <span className="text-ink/55">{snapshot?.weather?.explanation ?? "Analyze a snapshot to see architectural weather."}</span>
+        <span className="font-semibold">{snapshot?.weather?.condition ?? "No outlook"}</span>
+        <span className="text-ink/55">{snapshot?.weather?.explanation ?? "Analyze a snapshot to see the evolution outlook."}</span>
       </div>
       <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
         <div className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
@@ -842,6 +956,11 @@ function TimePortal({
   const afterEdges = new Set((after?.edges ?? []).map((edge) => edgeKey(edge.source, edge.target)));
   const newEdges = [...afterEdges].filter((edge) => !beforeEdges.has(edge));
   const removedEdges = [...beforeEdges].filter((edge) => !afterEdges.has(edge));
+  const beforeNodes = new Set(before.nodes.map((node) => node.id));
+  const afterNodes = new Set((after?.nodes ?? []).map((node) => node.id));
+  const addedNodes = [...afterNodes].filter((node) => !beforeNodes.has(node));
+  const removedNodes = [...beforeNodes].filter((node) => !afterNodes.has(node));
+  const couplingDelta = (after?.metrics.coupling_score ?? 0) - before.metrics.coupling_score;
   const phaseLabels = ["Commit", "Changed files", "Neighbor modules", "Whole graph"];
   const rows = [
     ["Coupling", before.metrics.coupling_score.toFixed(3), after?.metrics.coupling_score.toFixed(3) ?? "-"],
@@ -853,6 +972,27 @@ function TimePortal({
     <div className="mt-4 rounded-md border border-amber/40 bg-white p-4 shadow-soft">
       <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-ink/55">Before / After Portal</h2>
       <p className="mt-2 text-sm leading-6 text-ink/70">{event.explanation}</p>
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        <div>
+          <div className="mb-2 flex items-center justify-between text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">
+            <span>Before</span>
+            <span>{removedNodes.length} removed nodes</span>
+          </div>
+          <DependencyGraph snapshot={before} highlighted={removedNodes} removedNodes={removedNodes} lens="centrality" compact />
+        </div>
+        <div>
+          <div className="mb-2 flex items-center justify-between text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">
+            <span>After</span>
+            <span>{addedNodes.length} added nodes</span>
+          </div>
+          <DependencyGraph snapshot={after} highlighted={addedNodes.length ? addedNodes : event.affected_modules} addedNodes={addedNodes} lens="centrality" compact />
+        </div>
+      </div>
+      <div className={`mt-3 rounded-md border p-3 text-sm ${
+        couplingDelta > 0 ? "border-rust/30 bg-rust/10 text-rust" : couplingDelta < 0 ? "border-moss/30 bg-moss/10 text-moss" : "border-ink/10 bg-[#fbfaf6] text-ink/60"
+      }`}>
+        Coupling {couplingDelta > 0 ? "increased" : couplingDelta < 0 ? "reduced" : "held steady"} by {Math.abs(couplingDelta).toFixed(3)}.
+      </div>
       <div className="mt-4 grid gap-2 md:grid-cols-4">
         {phaseLabels.map((label, index) => (
           <div
@@ -889,8 +1029,10 @@ function TimePortal({
         </div>
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <DiffList title="New Edges" items={newEdges.slice(0, 8)} empty="No new edges isolated." />
-        <DiffList title="Removed Edges" items={removedEdges.slice(0, 8)} empty="No removed edges isolated." />
+        <DiffList title="Added Nodes" items={addedNodes.slice(0, 8).map((item) => item.split("/").slice(-2).join("/"))} empty="No added nodes isolated." />
+        <DiffList title="Removed Nodes" items={removedNodes.slice(0, 8).map((item) => item.split("/").slice(-2).join("/"))} empty="No removed nodes isolated." />
+        <DiffList title="New Dependencies" items={newEdges.slice(0, 8)} empty="No new edges isolated." />
+        <DiffList title="Removed Dependencies" items={removedEdges.slice(0, 8)} empty="No removed edges isolated." />
       </div>
       <div className="mt-4 rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
         <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Causal Inference</div>
