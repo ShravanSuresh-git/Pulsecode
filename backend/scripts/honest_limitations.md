@@ -1,0 +1,3 @@
+# Honest Limitations
+
+The merge-mainline fix increased exact replay coverage, but the five-repo validation still reached only 16/31 sign agreement (52%), below the 65% threshold for adding a live corpus-stats endpoint. Improving this honestly requires a larger and more stable corpus, richer replay handling for ordinary cherry-pick conflicts and rename/delete cases, and a better validation target than "nearby interval with similar churn"; the current proxy often compares events from different repository phases or module sets, so it is useful as a smoke test but not strong evidence of causal accuracy.

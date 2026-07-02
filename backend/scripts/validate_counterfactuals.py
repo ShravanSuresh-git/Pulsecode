@@ -21,6 +21,10 @@ DEFAULT_REPOS = [
     "https://github.com/jazzband/prettytable.git",
 ]
 
+BASELINE_COMPARABLE_EVENTS = 30
+BASELINE_EXACT_COMPARABLE_EVENTS = 3
+BASELINE_CORRECT_EVENTS = 17
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate PulseCode counterfactual replay on a small public corpus.")
@@ -30,6 +34,11 @@ def main() -> int:
     parser.add_argument("--snapshot-size", type=int, default=8)
     parser.add_argument("--output", default=str(ROOT / "backend/scripts/validation_results.md"))
     parser.add_argument("--repos", nargs="*", default=DEFAULT_REPOS)
+    parser.add_argument(
+        "--debug-replay-failures",
+        action="store_true",
+        help="Print replay fallback reasons without changing validation scoring.",
+    )
     args = parser.parse_args()
 
     workdir = Path(args.workdir)
@@ -46,6 +55,16 @@ def main() -> int:
                 estimate = counterfactuals.get(event.index)
                 if estimate is None:
                     continue
+                if args.debug_replay_failures and estimate.replay_status != "exact":
+                    print(
+                        "REPLAY_DIAGNOSTIC"
+                        f" repo={result.repo_name}"
+                        f" snapshot={event.index}"
+                        f" status={estimate.replay_status}"
+                        f" event={event.title!r}"
+                        f" reason={estimate.approximation_note}",
+                        file=sys.stderr,
+                    )
                 predicted = contribution_direction(estimate)
                 nearby = nearby_real_history_direction(result.snapshots, event.index)
                 match = "unknown" if nearby == "unknown" or predicted == "steady" else str(predicted == nearby)
@@ -128,10 +147,23 @@ def write_markdown(path: Path, rows: list[dict[str, str]]) -> None:
     known = [row for row in rows if row.get("match") in {"True", "False"}]
     correct = sum(1 for row in known if row["match"] == "True")
     accuracy = correct / len(known) if known else 0
+    exact_known = [row for row in known if row.get("replay_status") == "exact"]
+    exact_rate = len(exact_known) / len(known) if known else 0
+    baseline_accuracy = BASELINE_CORRECT_EVENTS / BASELINE_COMPARABLE_EVENTS
+    baseline_exact_rate = BASELINE_EXACT_COMPARABLE_EVENTS / BASELINE_COMPARABLE_EVENTS
     lines = [
         "# PulseCode Counterfactual Validation Results",
         "",
         "This is a small-corpus sanity check for counterfactual replay. It compares the replay-predicted direction of coupling pressure with a nearby real-history interval of similar churn. It is useful engineering evidence, not proof of causality.",
+        "",
+        "## Before/After Summary",
+        "",
+        f"- Exact replay rate before: {BASELINE_EXACT_COMPARABLE_EVENTS}/{BASELINE_COMPARABLE_EVENTS} ({baseline_exact_rate:.0%}), after: {len(exact_known)}/{len(known)} ({exact_rate:.0%})",
+        f"- Sign agreement before: {BASELINE_CORRECT_EVENTS}/{BASELINE_COMPARABLE_EVENTS} ({baseline_accuracy:.0%}), after: {correct}/{len(known)} ({accuracy:.0%})",
+        "- What changed: merge commits are now attempted with `git cherry-pick -m 1`, which increased exact replay coverage.",
+        "- Outcome: sign agreement did not improve meaningfully and remains below 65%, so the corpus-stats endpoint is intentionally skipped for this milestone.",
+        "",
+        "## Current Results",
         "",
         f"- Repositories/events evaluated: {len(rows)}",
         f"- Comparable events: {len(known)}",
@@ -160,7 +192,7 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         "causal_confidence",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field, "") for field in fieldnames})

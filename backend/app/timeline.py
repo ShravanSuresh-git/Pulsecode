@@ -76,6 +76,7 @@ class CounterfactualReplay:
     explanation: str
     note: str
     replayed_commits: list[str]
+    git_backed: bool = False
 
 
 def analyze_repository(repo_path: Path, snapshot_size: int) -> AnalysisResult:
@@ -982,7 +983,7 @@ def _counterfactuals(
         actual = _counterfactual_metric_dict(after, after_snapshot.dna if after_snapshot else None)
         replay = _replay_counterfactual(repo_path, event, snapshots, actual) if repo_path and snapshots else _failed_replay(actual, "Counterfactual replay requires the repository path and analyzed snapshots.")
         actual_timeline = _actual_timeline(snapshots)
-        if replay.status == "exact":
+        if replay.git_backed:
             alternative_timeline = _timeline_with_replay(actual_timeline, event.index, replay.alternative, replay.status)
         else:
             _, alternative_timeline = _simulated_timelines(event, snapshots)
@@ -1028,6 +1029,8 @@ def _replay_counterfactual(
     base_sha = _resolve_full_sha(source_repo, previous.commits[-1].sha)
     prior_commits = _commits_through_snapshot(snapshots, event.previous_index)
     replayed_shas: list[str] = []
+    applied_interval: list[CommitInfo] = []
+    skipped_merge_reasons: list[str] = []
 
     try:
         with tempfile.TemporaryDirectory(prefix="pulsecode-counterfactual-") as temp_dir:
@@ -1036,25 +1039,56 @@ def _replay_counterfactual(
             _run_git(["checkout", "--quiet", base_sha], cwd=replay_path)
             for commit in kept_interval:
                 full_sha = _resolve_full_sha(source_repo, commit.sha)
-                if len(source_repo.commit(full_sha).parents) > 1:
-                    raise RuntimeError(f"merge commit {commit.sha} requires a parent selection")
-                _run_git(["cherry-pick", "--quiet", full_sha], cwd=replay_path)
-                replayed_shas.append(commit.sha)
+                is_merge = len(source_repo.commit(full_sha).parents) > 1
+                cherry_pick_args = ["cherry-pick", "--quiet"]
+                if is_merge:
+                    cherry_pick_args.extend(["-m", "1"])
+                cherry_pick_args.append(full_sha)
+                try:
+                    _run_git(cherry_pick_args, cwd=replay_path)
+                    replayed_shas.append(commit.sha)
+                    applied_interval.append(commit)
+                except subprocess.CalledProcessError as exc:
+                    reason = _git_failure_reason(exc, replay_path)
+                    if _is_empty_cherry_pick(reason):
+                        _skip_cherry_pick(replay_path)
+                        continue
+                    _abort_cherry_pick(replay_path)
+                    if is_merge:
+                        skipped_merge_reasons.append(f"{commit.sha}: {reason}")
+                        continue
+                    raise RuntimeError(f"commit {commit.sha} failed to cherry-pick: {reason}") from exc
 
-            metrics, dna = _state_metrics(replay_path, prior_commits + kept_interval, kept_interval)
+            metrics, dna = _state_metrics(replay_path, prior_commits + applied_interval, applied_interval)
             alternative = _counterfactual_metric_dict(metrics, dna)
+            skipped_note = ""
+            status = "exact"
+            if skipped_merge_reasons:
+                status = "approximate"
+                skipped_note = (
+                    f" {len(skipped_merge_reasons)} merge commit(s) still conflicted after `git cherry-pick -m 1` "
+                    f"and were omitted from the temporary replay: {'; '.join(skipped_merge_reasons[:3])}."
+                )
             return CounterfactualReplay(
-                status="exact",
+                status=status,
                 alternative=alternative,
                 explanation=(
                     f"PulseCode replayed the event range from {previous.label} to {current.label}, skipped "
                     f"{len(skip_shas)} event commit(s), and rebuilt dependency metrics from the resulting file tree."
+                    f"{skipped_note}"
                 ),
                 note=(
                     "Exact git replay: non-event commits were cherry-picked onto the pre-event snapshot and graph/DNA metrics "
                     "were rebuilt from that alternate file-tree state."
+                    if not skipped_merge_reasons
+                    else (
+                        "Git-backed approximate replay: non-event commits were replayed onto the pre-event snapshot, "
+                        "but some merge commits were omitted after `git cherry-pick -m 1` still conflicted."
+                        f"{skipped_note}"
+                    )
                 ),
                 replayed_commits=replayed_shas,
+                git_backed=True,
             )
     except Exception as exc:
         return _approximate_replay(event, actual, f"Exact replay fell back because cherry-picking without the target commits failed: {exc}")
@@ -1185,6 +1219,36 @@ def _timeline_with_replay(
 
 def _resolve_full_sha(repo: Repo, sha: str) -> str:
     return repo.commit(sha).hexsha
+
+
+def _git_failure_reason(exc: subprocess.CalledProcessError, cwd: Path) -> str:
+    detail = "\n".join(part.strip() for part in [exc.stderr, exc.stdout] if part and part.strip())
+    unmerged = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    conflict_files = [line.strip() for line in unmerged.stdout.splitlines() if line.strip()]
+    reason = detail or str(exc)
+    if conflict_files:
+        reason = f"{reason} Conflicted files: {', '.join(conflict_files[:6])}."
+    return " ".join(reason.split())
+
+
+def _is_empty_cherry_pick(reason: str) -> bool:
+    lowered = reason.lower()
+    return "previous cherry-pick is now empty" in lowered or "nothing to commit" in lowered
+
+
+def _skip_cherry_pick(cwd: Path) -> None:
+    subprocess.run(["git", "cherry-pick", "--skip"], cwd=cwd, text=True, capture_output=True, check=False, timeout=10)
+
+
+def _abort_cherry_pick(cwd: Path) -> None:
+    subprocess.run(["git", "cherry-pick", "--abort"], cwd=cwd, text=True, capture_output=True, check=False, timeout=10)
 
 
 def _run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
