@@ -53,7 +53,7 @@ Open `http://localhost:3000`.
 - Architectural decisions stored independently from commits.
 - Before/after time portal for structural events.
 - Architectural memories, fossils, turning points, and decision influence chains.
-- Counterfactual simulator that approximates the timeline without an architectural event.
+- Counterfactual replay engine that attempts an exact Git replay without the event commits, labels approximate/failed fallbacks, adds within-repo Granger causal signal, and records corpus validation in [backend/scripts/validation_results.md](backend/scripts/validation_results.md).
 - Deterministic repository biography, generated from metrics without LLMs.
 - Evolution Outlook states: Stable, Growing, Accelerating, Fragmenting, Consolidating, and High Risk.
 - Shareable Markdown, HTML, and PDF reports.

@@ -4,7 +4,10 @@ import hashlib
 import math
 import re
 import statistics
+import subprocess
+import tempfile
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
@@ -66,6 +69,15 @@ CODE_EXTENSIONS = {
 _IMPORT_EDGE_CACHE: dict[tuple[str, tuple[str, ...]], set[tuple[str, str]]] = {}
 
 
+@dataclass
+class CounterfactualReplay:
+    status: str
+    alternative: dict[str, float]
+    explanation: str
+    note: str
+    replayed_commits: list[str]
+
+
 def analyze_repository(repo_path: Path, snapshot_size: int) -> AnalysisResult:
     repo = Repo(repo_path)
     commits = list(repo.iter_commits("--all", max_count=400))
@@ -76,11 +88,12 @@ def analyze_repository(repo_path: Path, snapshot_size: int) -> AnalysisResult:
     _enrich_snapshots(snapshots)
     events = _detect_events(snapshots)
     _attach_event_causes(events, snapshots)
+    _attach_causal_confidence(events, snapshots)
     fossils = _detect_fossils(snapshots, events)
     turning_points = _turning_points(snapshots)
     decisions = _architectural_decisions(snapshots, events, turning_points)
     memories = _architectural_memories(snapshots, events)
-    counterfactuals = _counterfactuals(events, snapshots)
+    counterfactuals = _counterfactuals(events, snapshots, repo_path)
     influence_graph = _influence_graph(events)
     decision_influence_graph = _decision_influence_graph(decisions)
     family_tree = _module_family_tree(snapshots)
@@ -121,6 +134,7 @@ def _commit_info(repo: Repo, commit: Commit) -> CommitInfo:
         files_changed=sorted(files_changed),
         insertions=int(stats.get("insertions", 0)),
         deletions=int(stats.get("deletions", 0)),
+        is_merge=len(commit.parents) > 1,
     )
 
 
@@ -571,6 +585,113 @@ def _attach_event_causes(events: list[ArchitectureEvent], snapshots: list[Snapsh
         event.causes = _infer_causes(event, previous, current)
 
 
+def _attach_causal_confidence(events: list[ArchitectureEvent], snapshots: list[Snapshot]) -> None:
+    """Attach a within-repo causal signal from lagged commit features to DNA metric shifts.
+
+    This uses Granger causality on the repository's own snapshot time-series when statsmodels
+    is available and there are enough observations. It is temporal evidence inside one repo,
+    not proof of general causality across repositories.
+    """
+    signals, signal_note = _within_repo_causal_signals(snapshots)
+    for event in events:
+        if event.previous_index < 0 or event.index >= len(snapshots):
+            event.causal_signal_note = signal_note
+            continue
+        previous = snapshots[event.previous_index]
+        current = snapshots[event.index]
+        event_features = _commit_feature_vector(event.causal_commits or current.commits)
+        metric_deltas = _dna_metric_deltas(previous, current)
+        best_confidence = 0.0
+        best_metric = ""
+        best_feature = ""
+        for metric, delta in sorted(metric_deltas.items(), key=lambda item: abs(item[1]), reverse=True):
+            if abs(delta) < 0.005:
+                continue
+            for feature, value in event_features.items():
+                if value <= 0:
+                    continue
+                confidence = signals.get(metric, {}).get(feature, 0.0)
+                if confidence > best_confidence:
+                    best_confidence = confidence
+                    best_metric = metric
+                    best_feature = feature
+        event.causal_confidence = round(best_confidence, 2)
+        if best_confidence:
+            event.causal_signal_note = (
+                f"Within-repo causal signal: lagged {best_feature} precedes {best_metric} shifts "
+                f"with confidence {best_confidence:.2f}. This is not cross-repo causal proof."
+            )
+        else:
+            event.causal_signal_note = signal_note
+
+
+def _within_repo_causal_signals(snapshots: list[Snapshot]) -> tuple[dict[str, dict[str, float]], str]:
+    if len(snapshots) < 6:
+        return {}, "Insufficient within-repo time-series length for Granger causal signal; at least 6 snapshots are preferred."
+    try:
+        from statsmodels.tsa.stattools import grangercausalitytests
+    except Exception:
+        return {}, "Statsmodels is unavailable; within-repo Granger causal signal was not computed."
+
+    feature_rows = [_commit_feature_vector(snapshot.commits) for snapshot in snapshots[:-1]]
+    metric_delta_rows = [_dna_metric_deltas(previous, current) for previous, current in zip(snapshots, snapshots[1:])]
+    signals: dict[str, dict[str, float]] = defaultdict(dict)
+    feature_names = ["churn", "files_changed", "is_merge", "directory_spread"]
+    metric_names = list(metric_delta_rows[0].keys()) if metric_delta_rows else []
+    for metric in metric_names:
+        target = [row.get(metric, 0.0) for row in metric_delta_rows]
+        if _series_is_flat(target):
+            continue
+        for feature in feature_names:
+            predictor = [row.get(feature, 0.0) for row in feature_rows]
+            if _series_is_flat(predictor):
+                continue
+            try:
+                # statsmodels tests whether the second column helps predict the first.
+                result = grangercausalitytests(list(zip(target, predictor)), maxlag=1, verbose=False)
+                p_value = float(result[1][0]["ssr_ftest"][1])
+            except Exception:
+                continue
+            signals[metric][feature] = round(max(0.0, min(1.0, 1.0 - p_value)), 3)
+    if not signals:
+        return {}, "Within-repo Granger causal signal was inconclusive for this snapshot sequence."
+    return dict(signals), "Within-repo causal signal computed from lagged commit features and following snapshot DNA shifts."
+
+
+def _commit_feature_vector(commits: list[CommitInfo]) -> dict[str, float]:
+    files = [file for commit in commits for file in commit.files_changed if _is_sourceish(file)]
+    directories = {_directory(file) for file in files}
+    return {
+        "churn": float(sum(commit.insertions + commit.deletions for commit in commits)),
+        "files_changed": float(len(set(files))),
+        "is_merge": float(sum(1 for commit in commits if commit.is_merge)),
+        "directory_spread": float(len(directories)),
+    }
+
+
+def _dna_metric_deltas(previous: Snapshot, current: Snapshot) -> dict[str, float]:
+    if not previous.dna or not current.dna:
+        return {}
+    previous_dna = previous.dna.model_dump()
+    current_dna = current.dna.model_dump()
+    return {
+        key: float(current_dna.get(key, 0)) - float(previous_dna.get(key, 0))
+        for key in [
+            "coupling",
+            "dependency_concentration",
+            "modularity",
+            "centralization_score",
+            "layer_separation",
+            "cyclic_dependency_score",
+            "hotspot_concentration",
+        ]
+    }
+
+
+def _series_is_flat(values: list[float]) -> bool:
+    return len(values) < 4 or max(values) == min(values)
+
+
 def _infer_causes(event: ArchitectureEvent, previous: Snapshot, current: Snapshot) -> list[CausalFinding]:
     causes: list[CausalFinding] = []
     edge_delta = current.metrics.dependency_count - previous.metrics.dependency_count
@@ -846,46 +967,235 @@ def _decision_influence_graph(decisions: list[ArchitecturalDecision]) -> Influen
     return InfluenceGraph(nodes=nodes, edges=edges)
 
 
-def _counterfactuals(events: list[ArchitectureEvent], snapshots: list[Snapshot] | None = None) -> list[CounterfactualEstimate]:
+def _counterfactuals(
+    events: list[ArchitectureEvent],
+    snapshots: list[Snapshot] | None = None,
+    repo_path: Path | None = None,
+) -> list[CounterfactualEstimate]:
     estimates: list[CounterfactualEstimate] = []
+    snapshots = snapshots or []
     for event in events:
         after = event.after_metrics
         if not after:
             continue
-        coupling_delta = float(event.delta.get("coupling_score", 0))
-        dependency_delta = float(event.delta.get("dependency_count", 0))
-        complexity_delta = float(event.delta.get("complexity_proxy", 0))
-        actual = {
-            "coupling": after.coupling_score,
-            "density": after.coupling_score,
-            "centralization": max((cause.graph_statistics.get("centrality_delta", 0) for cause in event.causes), default=0.0),
-            "complexity": after.complexity_proxy,
-        }
-        alternative = {
-            "coupling": round(max(0, after.coupling_score - coupling_delta * 0.7), 4),
-            "density": round(max(0, after.coupling_score - coupling_delta * 0.7), 4),
-            "centralization": round(max(0, actual["centralization"] * 0.35), 4),
-            "complexity": round(max(0, after.complexity_proxy - complexity_delta * 0.55), 2),
-            "entropy": round(max(0, after.entropy - abs(coupling_delta) * 0.35), 3),
-        }
-        actual["entropy"] = after.entropy
-        actual_timeline, alternative_timeline = _simulated_timelines(event, snapshots or [])
+        after_snapshot = snapshots[event.index] if 0 <= event.index < len(snapshots) else None
+        actual = _counterfactual_metric_dict(after, after_snapshot.dna if after_snapshot else None)
+        replay = _replay_counterfactual(repo_path, event, snapshots, actual) if repo_path and snapshots else _failed_replay(actual, "Counterfactual replay requires the repository path and analyzed snapshots.")
+        actual_timeline = _actual_timeline(snapshots)
+        if replay.status == "exact":
+            alternative_timeline = _timeline_with_replay(actual_timeline, event.index, replay.alternative, replay.status)
+        else:
+            _, alternative_timeline = _simulated_timelines(event, snapshots)
+        causal_note = (
+            f"Within-repo causal signal confidence is {event.causal_confidence:.2f}. "
+            "This is temporal evidence inside one repository, not cross-repo causal proof."
+        )
         estimates.append(
             CounterfactualEstimate(
                 event_index=event.index,
-                approximation_note="Approximation only: PulseCode does not rewrite Git history; it dampens the event's measured graph deltas.",
+                approximation_note=f"{replay.note} {causal_note}",
+                replay_status=replay.status,
+                causal_confidence=event.causal_confidence,
                 actual=actual,
-                alternative=alternative,
-                estimated_delta={key: round(alternative[key] - actual[key], 4) for key in actual},
-                explanation=(
-                    f"Removing t={event.index} would likely reduce {dependency_delta:.0f} dependency-edge pressure "
-                    f"and dampen the dominant cause: {event.causes[0].cause if event.causes else 'unknown'}."
-                ),
+                alternative=replay.alternative,
+                estimated_delta={key: round(replay.alternative.get(key, actual[key]) - actual[key], 4) for key in actual},
+                explanation=replay.explanation,
                 actual_timeline=actual_timeline,
                 alternative_timeline=alternative_timeline,
             )
         )
     return estimates
+
+
+def _replay_counterfactual(
+    repo_path: Path | None,
+    event: ArchitectureEvent,
+    snapshots: list[Snapshot],
+    actual: dict[str, float],
+) -> CounterfactualReplay:
+    if repo_path is None or event.previous_index < 0 or event.index >= len(snapshots):
+        return _failed_replay(actual, "Counterfactual replay could not locate the event snapshot range.")
+
+    current = snapshots[event.index]
+    previous = snapshots[event.previous_index]
+    skipped = event.causal_commits or current.commits
+    skip_shas = {commit.sha for commit in skipped}
+    kept_interval = [commit for commit in current.commits if commit.sha not in skip_shas]
+    if not previous.commits or not skip_shas:
+        return _failed_replay(actual, "Counterfactual replay needs a parent snapshot and at least one target commit to remove.")
+
+    source_repo = Repo(repo_path)
+    base_sha = _resolve_full_sha(source_repo, previous.commits[-1].sha)
+    prior_commits = _commits_through_snapshot(snapshots, event.previous_index)
+    replayed_shas: list[str] = []
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="pulsecode-counterfactual-") as temp_dir:
+            replay_path = Path(temp_dir) / "repo"
+            _run_git(["clone", "--no-hardlinks", "--quiet", str(repo_path), str(replay_path)])
+            _run_git(["checkout", "--quiet", base_sha], cwd=replay_path)
+            for commit in kept_interval:
+                full_sha = _resolve_full_sha(source_repo, commit.sha)
+                if len(source_repo.commit(full_sha).parents) > 1:
+                    raise RuntimeError(f"merge commit {commit.sha} requires a parent selection")
+                _run_git(["cherry-pick", "--quiet", full_sha], cwd=replay_path)
+                replayed_shas.append(commit.sha)
+
+            metrics, dna = _state_metrics(replay_path, prior_commits + kept_interval, kept_interval)
+            alternative = _counterfactual_metric_dict(metrics, dna)
+            return CounterfactualReplay(
+                status="exact",
+                alternative=alternative,
+                explanation=(
+                    f"PulseCode replayed the event range from {previous.label} to {current.label}, skipped "
+                    f"{len(skip_shas)} event commit(s), and rebuilt dependency metrics from the resulting file tree."
+                ),
+                note=(
+                    "Exact git replay: non-event commits were cherry-picked onto the pre-event snapshot and graph/DNA metrics "
+                    "were rebuilt from that alternate file-tree state."
+                ),
+                replayed_commits=replayed_shas,
+            )
+    except Exception as exc:
+        return _approximate_replay(event, actual, f"Exact replay fell back because cherry-picking without the target commits failed: {exc}")
+
+
+def _approximate_replay(event: ArchitectureEvent, actual: dict[str, float], reason: str) -> CounterfactualReplay:
+    coupling_delta = float(event.delta.get("coupling_score", 0))
+    dependency_delta = float(event.delta.get("dependency_count", 0))
+    complexity_delta = float(event.delta.get("complexity_proxy", 0))
+    alternative = dict(actual)
+    alternative.update(
+        {
+            "coupling": round(max(0.0, actual.get("coupling", 0) - coupling_delta * 0.7), 4),
+            "density": round(max(0.0, actual.get("density", 0) - coupling_delta * 0.7), 4),
+            "centralization": round(max(0.0, actual.get("centralization", 0) * 0.35), 4),
+            "complexity": round(max(0.0, actual.get("complexity", 0) - complexity_delta * 0.55), 2),
+            "entropy": round(max(0.0, actual.get("entropy", 0) - abs(coupling_delta) * 0.35), 3),
+            "dependency_count": round(max(0.0, actual.get("dependency_count", 0) - dependency_delta * 0.7), 2),
+        }
+    )
+    return CounterfactualReplay(
+        status="approximate",
+        alternative=alternative,
+        explanation=(
+            f"{reason}. The displayed alternative is an explicitly labeled fallback based on observed event deltas, "
+            "not an exact alternate Git history."
+        ),
+        note=f"Approximate mode: {reason}.",
+        replayed_commits=[],
+    )
+
+
+def _failed_replay(actual: dict[str, float], reason: str) -> CounterfactualReplay:
+    return CounterfactualReplay(
+        status="failed",
+        alternative=dict(actual),
+        explanation=f"{reason} PulseCode therefore does not report a structural difference for this counterfactual.",
+        note=f"Replay failed: {reason}",
+        replayed_commits=[],
+    )
+
+
+def _counterfactual_metric_dict(metrics: SnapshotMetrics, dna: ArchitectureDNA | None) -> dict[str, float]:
+    return {
+        "coupling": metrics.coupling_score,
+        "density": metrics.coupling_score,
+        "centralization": dna.centralization_score if dna else 0.0,
+        "complexity": metrics.complexity_proxy,
+        "entropy": metrics.entropy,
+        "dependency_count": float(metrics.dependency_count),
+        "modularity": dna.modularity if dna else 0.0,
+        "dependency_concentration": dna.dependency_concentration if dna else 0.0,
+    }
+
+
+def _state_metrics(
+    repo_path: Path,
+    commits: list[CommitInfo],
+    interval_commits: list[CommitInfo],
+) -> tuple[SnapshotMetrics, ArchitectureDNA]:
+    cochange: Counter[tuple[str, str]] = Counter()
+    file_churn: Counter[str] = Counter()
+    file_commits: Counter[str] = Counter()
+    for commit in commits:
+        changed = [file for file in commit.files_changed if _is_sourceish(file)]
+        churn = commit.insertions + commit.deletions
+        for file in changed:
+            file_churn[file] += max(1, churn // max(1, len(changed)))
+            file_commits[file] += 1
+        for left, right in combinations(sorted(set(changed)), 2):
+            cochange[(left, right)] += 1
+
+    files = _tracked_source_files(repo_path)
+    graph = _graph_from_state(repo_path, files, cochange)
+    nodes = _nodes_from_graph(graph, file_churn, file_commits)
+    edges = [
+        GraphEdge(source=source, target=target, weight=float(data["weight"]), kind=data["kind"])
+        for source, target, data in graph.edges(data=True)
+    ]
+    metrics = _metrics(interval_commits, graph, nodes, edges)
+    return metrics, _dna(metrics, graph, nodes)
+
+
+def _tracked_source_files(repo_path: Path) -> set[str]:
+    try:
+        result = _run_git(["ls-files"], cwd=repo_path)
+    except Exception:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip() and _is_sourceish(line.strip())}
+
+
+def _commits_through_snapshot(snapshots: list[Snapshot], index: int) -> list[CommitInfo]:
+    commits: list[CommitInfo] = []
+    for snapshot in snapshots[: index + 1]:
+        commits.extend(snapshot.commits)
+    return commits
+
+
+def _actual_timeline(snapshots: list[Snapshot]) -> list[dict[str, float | int | str]]:
+    return [
+        {
+            "snapshot": snapshot.index,
+            "label": snapshot.label,
+            "coupling": snapshot.metrics.coupling_score,
+            "density": snapshot.metrics.coupling_score,
+            "centrality": snapshot.dna.centralization_score if snapshot.dna else 0,
+            "entropy": snapshot.metrics.entropy,
+            "complexity": snapshot.metrics.complexity_proxy,
+            "dependency_count": snapshot.metrics.dependency_count,
+        }
+        for snapshot in snapshots
+    ]
+
+
+def _timeline_with_replay(
+    actual_timeline: list[dict[str, float | int | str]],
+    event_index: int,
+    alternative: dict[str, float],
+    replay_status: str,
+) -> list[dict[str, float | int | str]]:
+    timeline = [dict(item) for item in actual_timeline]
+    for item in timeline:
+        if item.get("snapshot") == event_index:
+            item.update(alternative)
+            item["replay_status"] = replay_status
+    return timeline
+
+
+def _resolve_full_sha(repo: Repo, sha: str) -> str:
+    return repo.commit(sha).hexsha
+
+
+def _run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=45,
+    )
 
 
 def _architectural_memories(snapshots: list[Snapshot], events: list[ArchitectureEvent]) -> list[ArchitecturalMemory]:

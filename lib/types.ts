@@ -48,6 +48,7 @@ export type CommitInfo = {
   files_changed: string[];
   insertions: number;
   deletions: number;
+  is_merge: boolean;
 };
 
 export type GraphNode = {
@@ -108,6 +109,8 @@ export type ArchitectureEvent = {
   affected_modules: string[];
   title: string;
   influence_score: number;
+  causal_confidence: number;
+  causal_signal_note: string;
   causal_commits: CommitInfo[];
   before_metrics: Metrics | null;
   after_metrics: Metrics | null;
@@ -160,6 +163,8 @@ export type TurningPoint = {
 export type CounterfactualEstimate = {
   event_index: number;
   approximation_note: string;
+  replay_status: "exact" | "approximate" | "failed";
+  causal_confidence: number;
   actual: Record<string, number>;
   alternative: Record<string, number>;
   estimated_delta: Record<string, number>;

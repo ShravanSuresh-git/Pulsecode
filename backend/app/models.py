@@ -11,6 +11,7 @@ class CommitInfo(BaseModel):
     files_changed: list[str]
     insertions: int
     deletions: int
+    is_merge: bool = False
 
 
 class GraphNode(BaseModel):
@@ -90,6 +91,8 @@ class ArchitectureEvent(BaseModel):
     affected_modules: list[str]
     title: str = ""
     influence_score: float = 0
+    causal_confidence: float = 0
+    causal_signal_note: str = ""
     causal_commits: list[CommitInfo] = []
     before_metrics: SnapshotMetrics | None = None
     after_metrics: SnapshotMetrics | None = None
@@ -142,6 +145,8 @@ class TurningPoint(BaseModel):
 class CounterfactualEstimate(BaseModel):
     event_index: int
     approximation_note: str
+    replay_status: str = "approximate"
+    causal_confidence: float = 0
     actual: dict[str, float]
     alternative: dict[str, float]
     estimated_delta: dict[str, float]

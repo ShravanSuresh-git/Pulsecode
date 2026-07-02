@@ -722,6 +722,9 @@ function EventsPanel({
                   Why: {event.causes[0].cause} ({Math.round(event.causes[0].confidence * 100)}%)
                 </div>
               ) : null}
+              <div className="mt-2 rounded-md bg-white p-2 text-xs text-ink/60">
+                Within-repo causal signal: {Math.round(event.causal_confidence * 100)}%
+              </div>
               {event.causal_commits.length > 0 ? (
                 <div className="mt-2 border-t border-ink/10 pt-2 text-xs text-ink/55">
                   {event.causal_commits.slice(0, 2).map((commit) => (
@@ -909,11 +912,7 @@ function WhyPanel({
           value={topMemory?.title ?? "No persistent memory yet"}
           detail={topMemory?.reason ?? "Persistent decisions appear when modules keep shaping the latest graph."}
         />
-        <ResearchCard
-          title="Counterfactual"
-          value={counterfactual ? `Without t=${counterfactual.event_index}` : "No counterfactual yet"}
-          detail={counterfactual?.explanation ?? "Counterfactuals approximate graph metrics without rewriting Git history."}
-        />
+        <CounterfactualCard counterfactual={counterfactual} />
         <ResearchCard
           title="Influence Chain"
           value={influence ? `t=${influence.source_event} → t=${influence.target_event}` : "No chain isolated"}
@@ -937,6 +936,37 @@ function ResearchCard({ title, value, detail }: { title: string; value: string; 
       <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">{title}</div>
       <div className="mt-1 text-sm font-semibold text-ink">{value}</div>
       <div className="mt-1 text-xs leading-5 text-ink/60">{detail}</div>
+    </div>
+  );
+}
+
+function CounterfactualCard({ counterfactual }: { counterfactual: Health["counterfactuals"][number] | undefined }) {
+  const status = counterfactual?.replay_status ?? "failed";
+  const badgeClass =
+    status === "exact"
+      ? "bg-moss/10 text-moss"
+      : status === "approximate"
+        ? "bg-amber/15 text-ink/70"
+        : "bg-rust/10 text-rust";
+  return (
+    <div className="rounded-md border border-ink/10 bg-[#fbfaf6] p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Counterfactual</div>
+        <span className={`rounded px-2 py-0.5 text-[11px] font-semibold uppercase ${badgeClass}`}>
+          {status}
+        </span>
+      </div>
+      <div className="mt-1 text-sm font-semibold text-ink">
+        {counterfactual ? `Without t=${counterfactual.event_index}` : "No counterfactual yet"}
+      </div>
+      <div className="mt-1 text-xs leading-5 text-ink/60">
+        {counterfactual?.explanation ?? "Counterfactuals report exact replay when Git can replay the history and clearly label fallback modes."}
+      </div>
+      {counterfactual ? (
+        <div className="mt-2 text-xs text-ink/50">
+          Within-repo causal signal {Math.round(counterfactual.causal_confidence * 100)}%
+        </div>
+      ) : null}
     </div>
   );
 }
